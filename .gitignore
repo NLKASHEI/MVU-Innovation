@@ -1,0 +1,39 @@
+
+# Ignore IntelliJ IDEA project files
+.idea/
+*.iml
+
+# Ignore TypeScript build files
+dist/
+out/
+build/
+
+# Ignore Node.js dependencies
+node_modules/
+.yarn/
+
+# Ignore logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ignore TypeScript cache files
+*.tsbuildinfo
+
+# Ignore coverage reports
+coverage/
+
+# Ignore environmental variables and secrets
+.env
+.env.*
+
+# Ignore Webpack cache
+.cache/
+auto-imports.d.ts
+components.d.ts
+
+# Ignore Visual Studio
+.vs/
+
+# Ignore OS generated files
+.DS_Store

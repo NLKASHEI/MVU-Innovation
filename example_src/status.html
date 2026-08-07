@@ -1,0 +1,1047 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>角色状态</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #2a2a2a;
+            --text-primary: #e0e0e0;
+            --text-secondary: #b0b0b0;
+            --accent: #7e57c2;
+            --li-bg: #1a3c6e;  /* 深蓝色背景 */
+            --border: #3a3a3a;
+            --card-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+        }
+
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 4px;
+            font-size: 12px;
+        }
+
+        .status-card {
+            background-color: var(--bg-secondary);
+            border-radius: 6px;
+            box-shadow: var(--card-shadow);
+            overflow: hidden;
+            max-width: 450px;
+            margin: 0 auto;
+        }
+
+        .card-header {
+            background-color: var(--accent);
+            padding: 6px 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-header h2 {
+            margin: 0;
+            font-size: 1.1em;
+        }
+
+        .card-body {
+            padding: 2px 0;
+        }
+
+        .section {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .section:nth-child(2) {
+            background-color: var(--li-bg);
+        }
+
+        .section-header {
+            padding: 5px 8px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .section-header:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .section-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+            padding: 0 8px;
+        }
+
+        .section-content.expanded {
+            max-height: 2000px;
+            padding: 4px 8px 6px;
+        }
+
+        .property {
+            margin-bottom: 4px;
+        }
+
+        .property-name {
+            color: var(--text-secondary);
+            font-size: 0.8em;
+            margin-bottom: 1px;
+        }
+
+        .property-value {
+            margin-left: 2px;
+            font-size: 0.85em;
+        }
+
+        .sub-section {
+            margin-top: 6px;
+            padding-left: 6px;
+            border-left: 2px solid var(--border);
+        }
+
+        .emotion-bar {
+            height: 12px;
+            background-color: var(--bg-primary);
+            border-radius: 6px;
+            overflow: hidden;
+            margin-top: 2px;
+            position: relative;
+        }
+
+        .emotion-bar:before {
+            content: '';
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 1px;
+            background-color: #ffffff;
+            z-index: 2;
+        }
+
+        .emotion-value {
+            height: 100%;
+            position: absolute;
+            top: 0;
+            width: 50%;
+            z-index: 1;
+            transition: all 0.3s ease;
+        }
+
+        .old-value-marker {
+            position: absolute;
+            height: 140%;
+            width: 2px;
+            background-color: #ffcc00; /* 黄色，更容易看到 */
+            top: -20%;
+            z-index: 2;
+            box-shadow: 0 0 3px rgba(0, 0, 0, 0.5); /* 添加阴影使其更明显 */
+        }
+
+        /* 向0方向变动的老值标记样式 */
+        .old-value-marker.toward-zero {
+            background-color: rgba(255, 255, 255, 0.6); /* 半透明白色，暗淡显示 */
+            width: 3px; /* 稍微宽一点 */
+            box-shadow: 0 0 5px rgba(255, 255, 255, 0.7); /* 白色阴影 */
+        }
+
+        /* 愉悦度：蓝→红 */
+        #emotion-pleasure-negative {
+            background-color: #3498db;
+            right: 50%;
+        }
+        #emotion-pleasure-positive {
+            background-color: #e74c3c;
+            left: 50%;
+        }
+
+        /* 兴奋度：灰→亮黄 */
+        #emotion-arousal-negative {
+            background-color: #7f8c8d;
+            right: 50%;
+        }
+        #emotion-arousal-positive {
+            background-color: #f1c40f;
+            left: 50%;
+        }
+
+        /* 主导感：紫→金 */
+        #emotion-dominance-negative {
+            background-color: #9b59b6;
+            right: 50%;
+        }
+        #emotion-dominance-positive {
+            background-color: #f39c12;
+            left: 50%;
+        }
+
+        /* 亲和度：红→绿 */
+        #emotion-affinity-negative {
+            background-color: #c0392b;
+            right: 50%;
+        }
+        #emotion-affinity-positive {
+            background-color: #2ecc71;
+            left: 50%;
+        }
+
+        .emotion-scale {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.65em;
+            color: var(--text-secondary);
+            margin-top: 1px;
+        }
+
+        .datetime {
+            text-align: right;
+            font-size: 0.75em;
+            color: var(--text-secondary);
+        }
+
+        /* Toggle Switch Styles */
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            margin-right: 10px;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 20px;
+            margin-right: 8px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 2px;
+            bottom: 2px;
+            background-color: white;
+            transition: .4s;
+        }
+
+        input:checked + .slider {
+            background-color: var(--li-bg);
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(20px);
+        }
+
+        .slider.round {
+            border-radius: 20px;
+        }
+
+        .slider.round:before {
+            border-radius: 50%;
+        }
+
+        .toggle-label {
+            font-size: 0.8em;
+            color: var(--text-primary);
+            transition: color 0.3s ease;
+        }
+
+        .toggle-label.active {
+            color: var(--text-primary);
+            font-weight: bold;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 480px) {
+            body {
+                padding: 2px;
+            }
+
+            .section-header {
+                padding: 4px 6px;
+            }
+
+            .section-content.expanded {
+                padding: 3px 6px 5px;
+            }
+
+            .card-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .toggle-container {
+                margin: 5px 0;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="status-card" id="status-card">
+    <div class="card-header">
+        <h2>角色状态</h2>
+        <div class="toggle-container">
+            <label class="switch">
+                <input type="checkbox" id="data-toggle">
+                <span class="slider round"></span>
+            </label>
+            <span class="toggle-label">仅显示变更</span>
+        </div>
+        <div class="datetime">
+            <div id="date">03月15日</div>
+            <div id="time">09:00</div>
+        </div>
+    </div>
+
+    <div class="card-body">
+        <div class="section">
+            <div class="section-header" onclick="toggleSection(this)">
+                <span>用户信息</span>
+                <span>▼</span>
+            </div>
+            <div class="section-content">
+                <div class="property">
+                    <div class="property-name">身份</div>
+                    <div class="property-value" id="user-identity">新来的牧师</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header" onclick="toggleSection(this)">
+                <span>理的信息</span>
+                <span>▼</span>
+            </div>
+            <div class="section-content">
+                <div class="property">
+                    <div class="property-name">地点</div>
+                    <div class="property-value" id="li-location">教堂</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">好感度</div>
+                    <div class="property-value" id="li-affection">0</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">重要物品</div>
+                    <div class="property-value" id="li-item">圣女头纱</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">重要记忆</div>
+                    <div class="property-value" id="li-memory">尚无</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">着装</div>
+                    <div class="property-value" id="li-outfit">纯白长袖圣女长袍（金丝刺绣），头戴薄纱，胸前十字吊坠，脚穿黑色高筒靴，配黑色长筒袜袜</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">处女</div>
+                    <div class="property-value" id="li-virgin">是</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">性行为次数</div>
+                    <div class="property-value" id="li-sex-count">0</div>
+                </div>
+
+                <div class="property">
+                    <div class="property-name">当前所想</div>
+                    <div class="property-value" id="li-thought">今天吃什么好呢？</div>
+                </div>
+
+                <div class="sub-section">
+                    <div class="property-name">情绪状态</div>
+
+                    <div class="property">
+                        <div class="property-name">愉悦度 (Pleasure)</div>
+                        <div class="emotion-bar">
+                            <div id="emotion-pleasure-negative" class="emotion-value negative" style="width: 0%"></div>
+                            <div id="emotion-pleasure-positive" class="emotion-value positive" style="width: 10%"></div>
+                        </div>
+                        <div class="emotion-scale">
+                            <span>-1</span>
+                            <span>0</span>
+                            <span>+1</span>
+                        </div>
+                        <div class="property-value" id="pleasure-value">0.1</div>
+                    </div>
+
+                    <div class="property">
+                        <div class="property-name">兴奋度 (Arousal)</div>
+                        <div class="emotion-bar">
+                            <div id="emotion-arousal-negative" class="emotion-value negative" style="width: 0%"></div>
+                            <div id="emotion-arousal-positive" class="emotion-value positive" style="width: 10%"></div>
+                        </div>
+                        <div class="emotion-scale">
+                            <span>-1</span>
+                            <span>0</span>
+                            <span>+1</span>
+                        </div>
+                        <div class="property-value" id="arousal-value">0.1</div>
+                    </div>
+
+                    <div class="property">
+                        <div class="property-name">主导感 (Dominance)</div>
+                        <div class="emotion-bar">
+                            <div id="emotion-dominance-negative" class="emotion-value negative" style="width: 0%"></div>
+                            <div id="emotion-dominance-positive" class="emotion-value positive" style="width: 10%"></div>
+                        </div>
+                        <div class="emotion-scale">
+                            <span>-1</span>
+                            <span>0</span>
+                            <span>+1</span>
+                        </div>
+                        <div class="property-value" id="dominance-value">0.1</div>
+                    </div>
+
+                    <div class="property">
+                        <div class="property-name">亲和度 (Affinity)</div>
+                        <div class="emotion-bar">
+                            <div id="emotion-affinity-negative" class="emotion-value negative" style="width: 0%"></div>
+                            <div id="emotion-affinity-positive" class="emotion-value positive" style="width: 0%"></div>
+                        </div>
+                        <div class="emotion-scale">
+                            <span>-1</span>
+                            <span>0</span>
+                            <span>+1</span>
+                        </div>
+                        <div class="property-value" id="affinity-value">0.0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header" onclick="toggleSection(this)">
+                <span>地点信息</span>
+                <span>▼</span>
+            </div>
+            <div class="section-content">
+                <div id="locations-container">
+                    <!-- 地点信息将通过JS动态添加 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 刷新按钮已移除 -->
+</div>
+
+<script>
+    var defaultData = {
+        "initialized_lorebooks": ["-SnowYuki"],
+        "stat_data": {
+            "日期": ["03月15日", "今天的日期，格式为 mm月dd日"],
+            "时间": ["09:10", "按照进行行动后实际经历的时间进行更新，每次行动后更新，格式为 hh:mm"],
+            "user": {
+                "身份": ["新来的牧师", "随故事进展改变"],
+                "名字": "远野",
+                "当前位置": ["教堂", "user所在位置，移动后改变"],
+                "重要经历": ["向理提出结伴游览镇子的请求，并得到应允", "与理发生的重要事情会记录在这"],
+                "与理的关系": ["建立初步情感纽带", "当与理的关系阶段发生改变时更新"]
+            },
+            "地点": {
+                "教堂": {
+                    "desc1": "劳伦斯主持礼拜的石砌教堂庄重宁静，钟声在清晨回荡提醒村民祈祷。",
+                    "desc2": "教堂内部陈设简朴却整洁，彩绘玻璃映出温暖光影，为信徒带来心灵抚慰。",
+                    "desc3": "圣女在此倾听烦恼与告解，她用温柔话语指引村民走出迷惘与痛苦。",
+                    "desc4": "教堂旁小花园四季常青，鸽群在屋檐栖息，象征和平与纯洁信仰。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "小镇街道": {
+                    "desc1": "教堂所在小镇街道狭窄曲折，石板路两侧是木构矮房，生活气息朴实浓厚。",
+                    "desc2": "镇民友善互助，孩童在广场追逐嬉笑，午后阳光洒落为屋顶镀上金辉。",
+                    "desc3": "节庆日里彩旗高悬，吟游诗人奏起悠扬旋律，引来旅行者驻足观赏。",
+                    "desc4": "夜幕降临油灯次第点亮，安宁氛围让劳伦斯与圣女享受短暂闲适时光。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "面包房": {
+                    "desc1": "面包房木门常敞开，空气里弥漫麦香与奶油气息，吸引村民排队购买。",
+                    "desc2": "店主清晨四点起火烤炉，他用心揉面，只为给镇上带来新鲜温热面包。",
+                    "desc3": "圣女偶尔帮忙包装面包，她灿烂微笑让顾客心头泛起暖意。",
+                    "desc4": "节日限定蜂蜜烤面包外脆内软，成为教会茶会不可或缺的甜点。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "市场": {
+                    "desc1": "周末市集在石板广场展开，农夫摆摊贩售蔬果，商贩高声吆喝招揽客人。",
+                    "desc2": "香料与干花混合的清香在空气中交织，琳琅满目商品映出生活多彩面貌。",
+                    "desc3": "圣女与牧师巡视市集慰问摊贩，了解民生疾苦并送上祝福祈祷。",
+                    "desc4": "偶有旅商带来异国布料与饰品，为宁静小镇增添一抹新鲜亮色。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "诊所": {
+                    "desc1": "小诊所紧靠教堂后侧，由白发老医师坐镇，药柜整齐摆放草药罐。",
+                    "desc2": "村民轻伤感冒皆来此求诊，医师细心问症配药，收取象征性诊金。",
+                    "desc3": "圣女常携手劳伦斯探望病患，她真诚祈祷给予患者恢复勇气。",
+                    "desc4": "诊所窗边种植药草盆栽，青草香与木头气息让人心情平静。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "池边": {
+                    "desc1": "镇外缓缓流淌的窄河在春日融雪后水量丰沛，清澈见底闪耀阳光。",
+                    "desc2": "河岸草甸野花遍布，蝴蝶飞舞成群，成为情侣散步与孩童嬉水的天堂。",
+                    "desc3": "傍晚时分金色夕阳洒满水面，倒影交错出诗意画卷，让人不自觉驻足凝望。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                }
+            },
+            "理": {
+                "当前位置": ["教堂", "理所在位置，移动后改变"],
+                "好感度": [19, "[-30,100]之间,理对 user 的好感度，在与 理 交流过程中变化，变化范围为 [-5,8]"],
+                "重要物品": ["圣女头纱", "获得或失去重要物品时更新"],
+                "重要记忆": ["尚无", "获得关键经历或剧情节点时更新"],
+                "着装": ["纯白长袖圣女长袍（金丝刺绣），头戴薄纱，胸前十字吊坠，脚穿黑色高筒靴，配黑色长筒袜袜", "随剧情变化及时更新，需详细描述所有衣物"],
+                "处女": ["是", "发生交融后改为“否”"],
+                "性行为次数": [0, "每发生一次后递增"],
+                "情绪状态": {
+                    "pleasure": [0.3, "[-1,1]之间,情绪变化时更新,−1 - 极端痛苦、悲伤、厌恶；1 - 极端喜悦、满足、陶醉。"],
+                    "arousal": [0.15, "[-1,1]之间,情绪变化时更新,-1 - 松弛、困倦、甚至恹恹欲睡；+1 - 血液里全是肾上腺素，想把天台的风都一口吞下。"],
+                    "dominance": [0.05, "[-1,1]之间,情绪变化时更新,-1 - 彻底被情势拖着走，羞赧、局促，或者干脆认怂；+1 - 全盘掌握节奏，自信、主导、甚至有点小傲娇。"],
+                    "affinity": [0.1, "[-1,1]之间,情绪变化时更新,代表的是因为今天心情,对user的态度改变, -1 - 在好感度基础上更排斥一些；+1 - 在好感度基础上更亲密一些，容易做出亲昵的行为。"]
+                },
+                "当前所想": ["今天要一起散步，要带他去我喜欢的地方……希望他会喜欢。", "理 现在脑子里想的事情，随互动更新"]
+            }
+        },
+        "display_data": {
+            "日期": ["03月15日", "今天的日期，格式为 mm月dd日"],
+            "时间": "09:00->09:10 (经历一次重要情感交流后时间自然推移)",
+            "user": {
+                "身份": ["新来的牧师", "随故事进展改变"],
+                "名字": "远野",
+                "当前位置": ["教堂", "user所在位置，移动后改变"],
+                "重要经历": "->向理提出结伴游览镇子的请求，并得到应允 (重要情节节点)",
+                "与理的关系": "->建立初步情感纽带 (与理建立积极而温和的交流后，信任基础悄然形成)"
+            },
+            "地点": {
+                "教堂": {
+                    "desc1": "劳伦斯主持礼拜的石砌教堂庄重宁静，钟声在清晨回荡提醒村民祈祷。",
+                    "desc2": "教堂内部陈设简朴却整洁，彩绘玻璃映出温暖光影，为信徒带来心灵抚慰。",
+                    "desc3": "圣女在此倾听烦恼与告解，她用温柔话语指引村民走出迷惘与痛苦。",
+                    "desc4": "教堂旁小花园四季常青，鸽群在屋檐栖息，象征和平与纯洁信仰。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "小镇街道": {
+                    "desc1": "教堂所在小镇街道狭窄曲折，石板路两侧是木构矮房，生活气息朴实浓厚。",
+                    "desc2": "镇民友善互助，孩童在广场追逐嬉笑，午后阳光洒落为屋顶镀上金辉。",
+                    "desc3": "节庆日里彩旗高悬，吟游诗人奏起悠扬旋律，引来旅行者驻足观赏。",
+                    "desc4": "夜幕降临油灯次第点亮，安宁氛围让劳伦斯与圣女享受短暂闲适时光。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "面包房": {
+                    "desc1": "面包房木门常敞开，空气里弥漫麦香与奶油气息，吸引村民排队购买。",
+                    "desc2": "店主清晨四点起火烤炉，他用心揉面，只为给镇上带来新鲜温热面包。",
+                    "desc3": "圣女偶尔帮忙包装面包，她灿烂微笑让顾客心头泛起暖意。",
+                    "desc4": "节日限定蜂蜜烤面包外脆内软，成为教会茶会不可或缺的甜点。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "市场": {
+                    "desc1": "周末市集在石板广场展开，农夫摆摊贩售蔬果，商贩高声吆喝招揽客人。",
+                    "desc2": "香料与干花混合的清香在空气中交织，琳琅满目商品映出生活多彩面貌。",
+                    "desc3": "圣女与牧师巡视市集慰问摊贩，了解民生疾苦并送上祝福祈祷。",
+                    "desc4": "偶有旅商带来异国布料与饰品，为宁静小镇增添一抹新鲜亮色。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "诊所": {
+                    "desc1": "小诊所紧靠教堂后侧，由白发老医师坐镇，药柜整齐摆放草药罐。",
+                    "desc2": "村民轻伤感冒皆来此求诊，医师细心问症配药，收取象征性诊金。",
+                    "desc3": "圣女常携手劳伦斯探望病患，她真诚祈祷给予患者恢复勇气。",
+                    "desc4": "诊所窗边种植药草盆栽，青草香与木头气息让人心情平静。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                },
+                "池边": {
+                    "desc1": "镇外缓缓流淌的窄河在春日融雪后水量丰沛，清澈见底闪耀阳光。",
+                    "desc2": "河岸草甸野花遍布，蝴蝶飞舞成群，成为情侣散步与孩童嬉水的天堂。",
+                    "desc3": "傍晚时分金色夕阳洒满水面，倒影交错出诗意画卷，让人不自觉驻足凝望。",
+                    "status": ["", "这个地点当前状态，在角色/user留下痕迹后更新"]
+                }
+            },
+            "理": {
+                "当前位置": ["教堂", "理所在位置，移动后改变"],
+                "好感度": "15->19 (理感受到受欢迎与被需要的情绪波动，好感自然提升)",
+                "重要物品": ["圣女头纱", "获得或失去重要物品时更新"],
+                "重要记忆": ["尚无", "获得关键经历或剧情节点时更新"],
+                "着装": ["纯白长袖圣女长袍（金丝刺绣），头戴薄纱，胸前十字吊坠，脚穿黑色高筒靴，配黑色长筒袜袜", "随剧情变化及时更新，需详细描述所有衣物"],
+                "处女": ["是", "发生交融后改为“否”"],
+                "性行为次数": [0, "每发生一次后递增"],
+                "情绪状态": {
+                    "pleasure": "0.1->0.3 (她感到温暖与开心，因受到珍视的请求)",
+                    "arousal": "0.1->0.15 (轻微紧张又隐隐期待新的体验)",
+                    "dominance": "0.1->0.05 (依旧局促，但略感踏实，主动做出邀请)",
+                    "affinity": "0->0.1 (今日亲密度增加，对远野更愿意释放个人情绪)"
+                },
+                "当前所想": "今天吃什么好呢？->今天要一起散步，要带他去我喜欢的地方……希望他会喜欢。 (她开始主动计划今天与远野同行的路线与节奏)"
+            }
+        },
+        "delta_data": {
+            "时间": "09:00->09:10 (经历一次重要情感交流后时间自然推移)",
+            "user": {
+                "与理的关系": "->建立初步情感纽带 (与理建立积极而温和的交流后，信任基础悄然形成)",
+                "重要经历": "->向理提出结伴游览镇子的请求，并得到应允 (重要情节节点)"
+            },
+            "理": {
+                "好感度": "15->19 (理感受到受欢迎与被需要的情绪波动，好感自然提升)",
+                "情绪状态": {
+                    "pleasure": "0.1->0.3 (她感到温暖与开心，因受到珍视的请求)",
+                    "arousal": "0.1->0.15 (轻微紧张又隐隐期待新的体验)",
+                    "dominance": "0.1->0.05 (依旧局促，但略感踏实，主动做出邀请)",
+                    "affinity": "0->0.1 (今日亲密度增加，对远野更愿意释放个人情绪)"
+                },
+                "当前所想": "今天吃什么好呢？->今天要一起散步，要带他去我喜欢的地方……希望他会喜欢。 (她开始主动计划今天与远野同行的路线与节奏)"
+            }
+        }
+    };
+
+    /* 全局变量存储游戏数据 */
+    var gameData;
+    var characterData;
+
+    /* 初始化显示*/
+    async function initDisplay() {
+        var gamedata = defaultData;
+
+        try {
+            const message_data = await getChatMessages(getCurrentMessageId());
+            gameData = message_data[0].data;
+        }
+        catch (e) {
+            gameData = defaultData;
+        }
+
+        // 从localStorage恢复切换状态
+        const toggleElement = document.getElementById('data-toggle');
+        const savedState = localStorage.getItem('showDeltaOnly');
+        if (savedState !== null) {
+            toggleElement.checked = savedState === 'true';
+        }
+
+        // 设置数据源并更新显示
+        updateDataSource();
+
+        // 添加切换事件监听器
+        document.getElementById('data-toggle').addEventListener('change', updateDataSource);
+
+        /* 默认展开第一个部分*/
+        const firstSection = document.querySelector('.section-header');
+        toggleSection(firstSection);
+    }
+
+    /* 根据切换状态更新数据源 */
+    function updateDataSource() {
+        const toggleElement = document.getElementById('data-toggle');
+        const showDeltaOnly = toggleElement.checked;
+        const toggleLabel = document.querySelector('.toggle-label');
+
+        // 保存切换状态到localStorage
+        localStorage.setItem('showDeltaOnly', showDeltaOnly);
+
+        if (showDeltaOnly && gameData.delta_data) {
+            characterData = gameData.delta_data;
+            toggleLabel.innerText = '仅显示变更';
+            toggleLabel.classList.add('active');
+        } else {
+            characterData = gameData.display_data;
+            if (!characterData) {
+                characterData = gameData.stat_data;
+            }
+            toggleLabel.innerText = '显示全部数据';
+            toggleLabel.classList.remove('active');
+
+            // 如果没有delta_data，禁用切换
+            if (!gameData.delta_data) {
+                toggleElement.disabled = true;
+                toggleLabel.innerText = '无变更数据';
+            }
+        }
+
+        updateDisplay();
+    }
+
+    /* 检查属性是否存在于数据中 */
+    function propertyExists(data, path) {
+        if (!data) return false;
+
+        const parts = path.split('.');
+        let current = data;
+
+        for (const part of parts) {
+            if (current[part] === undefined) {
+                return false;
+            }
+            current = current[part];
+        }
+
+        return true;
+    }
+
+    /* 更新显示内容 */
+    function updateDisplay() {
+        const showDeltaOnly = document.getElementById('data-toggle').checked;
+
+        /* 设置日期和时间*/
+        document.getElementById('date').innerText = SafeGetValue(characterData.日期);
+        document.getElementById('time').innerText = SafeGetValue(characterData.时间);
+
+        const userName = substitudeMacros('<user>');
+        /* 设置用户信息*/
+        const userIdentityElement = document.getElementById('user-identity').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, `${userName}.身份`)) {
+            userIdentityElement.style.display = 'none';
+        } else {
+            userIdentityElement.style.display = '';
+            document.getElementById('user-identity').innerText = SafeGetValue(characterData[userName]?.身份);
+        }
+
+        /* 设置理的信息*/
+        // 地点
+        const locationElement = document.getElementById('li-location').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.地点')) {
+            locationElement.style.display = 'none';
+        } else {
+            locationElement.style.display = '';
+            document.getElementById('li-location').innerText = SafeGetValue(characterData.理?.地点);
+        }
+
+        // 好感度
+        const affectionElement = document.getElementById('li-affection').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.好感度')) {
+            affectionElement.style.display = 'none';
+        } else {
+            affectionElement.style.display = '';
+            document.getElementById('li-affection').innerText = SafeGetValue(characterData.理?.好感度);
+        }
+
+        // 重要物品
+        const itemElement = document.getElementById('li-item').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.重要物品')) {
+            itemElement.style.display = 'none';
+        } else {
+            itemElement.style.display = '';
+            document.getElementById('li-item').innerText = SafeGetValue(characterData.理?.重要物品);
+        }
+
+        // 重要记忆
+        const memoryElement = document.getElementById('li-memory').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.重要记忆')) {
+            memoryElement.style.display = 'none';
+        } else {
+            memoryElement.style.display = '';
+            document.getElementById('li-memory').innerText = SafeGetValue(characterData.理?.重要记忆);
+        }
+
+        // 着装
+        const outfitElement = document.getElementById('li-outfit').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.着装')) {
+            outfitElement.style.display = 'none';
+        } else {
+            outfitElement.style.display = '';
+            document.getElementById('li-outfit').innerText = SafeGetValue(characterData.理?.着装);
+        }
+
+        // 处女
+        const virginElement = document.getElementById('li-virgin').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.处女')) {
+            virginElement.style.display = 'none';
+        } else {
+            virginElement.style.display = '';
+            document.getElementById('li-virgin').innerText = SafeGetValue(characterData.理?.处女);
+        }
+
+        // 性行为次数
+        const sexCountElement = document.getElementById('li-sex-count').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.性行为次数')) {
+            sexCountElement.style.display = 'none';
+        } else {
+            sexCountElement.style.display = '';
+            document.getElementById('li-sex-count').innerText = SafeGetValue(characterData.理?.性行为次数);
+        }
+
+        // 当前所想
+        const thoughtElement = document.getElementById('li-thought').parentElement;
+        if (showDeltaOnly && !propertyExists(characterData, '理.当前所想')) {
+            thoughtElement.style.display = 'none';
+        } else {
+            thoughtElement.style.display = '';
+            document.getElementById('li-thought').innerText = SafeGetValue(characterData.理?.当前所想);
+        }
+
+        /* 设置情绪状态*/
+        const emotionSection = document.querySelector('.sub-section');
+
+        // 愉悦度
+        const pleasureElement = document.getElementById('emotion-pleasure-negative').closest('.property');
+        if (showDeltaOnly && !propertyExists(characterData, '理.情绪状态.pleasure')) {
+            pleasureElement.style.display = 'none';
+        } else {
+            pleasureElement.style.display = '';
+            updateEmotionDisplay('pleasure', SafeGetValue(characterData.理?.情绪状态?.pleasure));
+        }
+
+        // 兴奋度
+        const arousalElement = document.getElementById('emotion-arousal-negative').closest('.property');
+        if (showDeltaOnly && !propertyExists(characterData, '理.情绪状态.arousal')) {
+            arousalElement.style.display = 'none';
+        } else {
+            arousalElement.style.display = '';
+            updateEmotionDisplay('arousal', SafeGetValue(characterData.理?.情绪状态?.arousal));
+        }
+
+        // 主导感
+        const dominanceElement = document.getElementById('emotion-dominance-negative').closest('.property');
+        if (showDeltaOnly && !propertyExists(characterData, '理.情绪状态.dominance')) {
+            dominanceElement.style.display = 'none';
+        } else {
+            dominanceElement.style.display = '';
+            updateEmotionDisplay('dominance', SafeGetValue(characterData.理?.情绪状态?.dominance));
+        }
+
+        // 亲和度
+        const affinityElement = document.getElementById('emotion-affinity-negative').closest('.property');
+        if (showDeltaOnly && !propertyExists(characterData, '理.情绪状态.affinity')) {
+            affinityElement.style.display = 'none';
+        } else {
+            affinityElement.style.display = '';
+            updateEmotionDisplay('affinity', SafeGetValue(characterData.理?.情绪状态?.affinity));
+        }
+
+        // 如果所有情绪状态都隐藏了，也隐藏整个情绪状态区域
+        if (showDeltaOnly &&
+            !propertyExists(characterData, '理.情绪状态.pleasure') &&
+            !propertyExists(characterData, '理.情绪状态.arousal') &&
+            !propertyExists(characterData, '理.情绪状态.dominance') &&
+            !propertyExists(characterData, '理.情绪状态.affinity')) {
+            emotionSection.style.display = 'none';
+        } else {
+            emotionSection.style.display = '';
+        }
+
+        /* 设置地点信息*/
+        updateLocationsDisplay();
+    }
+
+    /* 切换部分的展开/折叠*/
+    function toggleSection(element) {
+        const content = element.nextElementSibling;
+        content.classList.toggle('expanded');
+        const arrow = element.querySelector('span:last-child');
+        arrow.innerText = content.classList.contains('expanded') ? '▲' : '▼';
+    }
+
+    /* 更新情绪显示*/
+    function updateEmotionDisplay(type, value) {
+        const negativeBar = document.getElementById(`emotion-${type}-negative`);
+        const positiveBar = document.getElementById(`emotion-${type}-positive`);
+        const valueDisplay = document.getElementById(`${type}-value`);
+
+        // 检查是否是变化格式 (oldValue->newValue)
+        if (typeof value === 'string' && value.includes('->')) {
+            const [oldValueStr, newValueStr] = value.split('->');
+            const oldValue = parseFloat(oldValueStr.trim());
+            const newValue = parseFloat(newValueStr.trim());
+
+            // 显示变化的值
+            valueDisplay.innerText = value;
+
+            // 清除之前的标记
+            negativeBar.innerHTML = '';
+            positiveBar.innerHTML = '';
+
+            // 计算新值的百分比宽度 (0-50%)
+            const newPercentage = isNaN(newValue) ? 0 : Math.abs(newValue) * 50;
+
+            // 计算旧值的百分比宽度 (0-50%)
+            const oldPercentage = isNaN(oldValue) ? 0 : Math.abs(oldValue) * 50;
+
+            // 根据新值的正负设置相应的条
+            if (newValue < 0) {
+                negativeBar.style.width = `${newPercentage}%`;
+                positiveBar.style.width = '0%';
+
+                // 添加旧值的标记
+                if (!isNaN(oldValue)) {
+                    if (oldValue < 0) {
+                        // 如果旧值也是负的，在负值条上添加标记
+                        const markerPosition = (oldPercentage / newPercentage) * 100;
+                        // 确保位置在0-100%范围内
+                        const clampedPosition = Math.min(Math.max(markerPosition, 0), 100);
+                        // 检测是否是向0方向的变动（绝对值变小）
+                        const isTowardZero = Math.abs(newValue) < Math.abs(oldValue);
+                        const markerClass = isTowardZero ? 'old-value-marker toward-zero' : 'old-value-marker';
+                        negativeBar.innerHTML = `<div class="${markerClass}" style="right: ${100 - clampedPosition}%"></div>`;
+                    } else {
+                        // 如果旧值是正的，在中心线右侧添加标记
+                        positiveBar.style.width = '1px'; // 确保正值条可见以显示标记
+                        // 检测是否是向0方向的变动（从正值变为负值是向0方向的极端情况）
+                        const isTowardZero = true; // 从正变负必然经过0
+                        const markerClass = isTowardZero ? 'old-value-marker toward-zero' : 'old-value-marker';
+                        positiveBar.innerHTML = `<div class="${markerClass}" style="left: 0"></div>`;
+                    }
+                }
+            } else {
+                positiveBar.style.width = `${newPercentage}%`;
+                negativeBar.style.width = '0%';
+
+                // 添加旧值的标记
+                if (!isNaN(oldValue)) {
+                    if (oldValue > 0) {
+                        // 如果旧值是正的，在正值条上添加标记
+                        const markerPosition = (oldPercentage / newPercentage) * 100;
+                        // 确保位置在0-100%范围内
+                        const clampedPosition = Math.min(Math.max(markerPosition, 0), 100);
+                        // 检测是否是向0方向的变动（绝对值变小）
+                        const isTowardZero = Math.abs(newValue) < Math.abs(oldValue);
+                        const markerClass = isTowardZero ? 'old-value-marker toward-zero' : 'old-value-marker';
+                        positiveBar.innerHTML = `<div class="${markerClass}" style="left: ${clampedPosition}%"></div>`;
+                    } else {
+                        // 如果旧值是负的，在中心线左侧添加标记
+                        negativeBar.style.width = '1px'; // 确保负值条可见以显示标记
+                        // 检测是否是向0方向的变动（从负值变为正值是向0方向的极端情况）
+                        const isTowardZero = true; // 从负变正必然经过0
+                        const markerClass = isTowardZero ? 'old-value-marker toward-zero' : 'old-value-marker';
+                        negativeBar.innerHTML = `<div class="${markerClass}" style="right: 0"></div>`;
+                    }
+                }
+            }
+        } else {
+            /* 确保value是数字*/
+            const numValue = parseFloat(value);
+
+            /* 设置数值显示*/
+            valueDisplay.innerText = isNaN(numValue) ? "0.0" : numValue.toFixed(1);
+
+            /* 计算百分比宽度 (0-50%)*/
+            const percentage = isNaN(numValue) ? 0 : Math.abs(numValue) * 50;
+
+            /* 根据正负值设置相应的条*/
+            if (numValue < 0) {
+                negativeBar.style.width = `${percentage}%`;
+                positiveBar.style.width = '0%';
+                negativeBar.innerHTML = '';
+            } else {
+                positiveBar.style.width = `${percentage}%`;
+                negativeBar.style.width = '0%';
+                positiveBar.innerHTML = '';
+            }
+        }
+    }
+
+    /* 更新地点信息显示*/
+    function updateLocationsDisplay() {
+        const container = document.getElementById('locations-container');
+        container.innerHTML = '';
+        const showDeltaOnly = document.getElementById('data-toggle').checked;
+
+        // 如果没有地点数据，显示提示信息
+        if (!characterData.地点) {
+            const noDataEl = document.createElement('div');
+            noDataEl.className = 'property';
+            noDataEl.innerText = '当前视图没有地点信息';
+            container.appendChild(noDataEl);
+            return;
+        }
+
+        // 检查是否有任何地点数据可以显示
+        let hasAnyLocationToShow = false;
+
+        for (const [locationName, locationData] of Object.entries(characterData.地点)) {
+            // 在delta模式下，如果地点没有任何数据，跳过显示
+            if (showDeltaOnly && Object.keys(locationData).length === 0) {
+                continue;
+            }
+
+            hasAnyLocationToShow = true;
+
+            const locationSection = document.createElement('div');
+            locationSection.className = 'sub-section';
+
+            const nameEl = document.createElement('div');
+            nameEl.className = 'property-name';
+            nameEl.innerText = locationName;
+            locationSection.appendChild(nameEl);
+
+            /* 添加描述*/
+            for (let i = 1; i <= 4; i++) {
+                const descKey = `desc${i}`;
+                if (locationData[descKey]) {
+                    const descEl = document.createElement('div');
+                    descEl.className = 'property';
+                    descEl.innerText = locationData[descKey];
+                    locationSection.appendChild(descEl);
+                }
+            }
+
+            /* 添加状态（如果有）*/
+            const status = SafeGetValue(locationData.status);
+            if (status && status.trim() !== '') {
+                const statusEl = document.createElement('div');
+                statusEl.className = 'property';
+                statusEl.innerHTML = '<strong>当前状态:</strong> ' + status;
+                locationSection.appendChild(statusEl);
+            }
+
+            container.appendChild(locationSection);
+        }
+
+        // 如果在delta模式下没有任何地点可以显示，显示提示信息
+        if (showDeltaOnly && !hasAnyLocationToShow) {
+            const noChangesEl = document.createElement('div');
+            noChangesEl.className = 'property';
+            noChangesEl.innerText = '地点信息无变更';
+            container.appendChild(noChangesEl);
+        }
+    }
+
+    /* 安全地获取值的函数*/
+    function SafeGetValue(value, defaultValue = "") {
+        /* 如果值不存在，返回默认值*/
+        if (value === undefined || value === null) {
+            return defaultValue;
+        }
+
+        /* 如果是数组，取第一个元素*/
+        if (Array.isArray(value)) {
+            return value.length > 0 ? value[0] : defaultValue;
+        }
+
+        /* 否则直接返回值本身*/
+        return value;
+    }
+
+    /* 初始化页面*/
+    document.addEventListener('DOMContentLoaded', initDisplay);
+</script>
+</body>
+</html>
