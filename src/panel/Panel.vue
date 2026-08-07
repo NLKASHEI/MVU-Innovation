@@ -9,6 +9,7 @@
             <Version />
             <Notification />
             <Update />
+            <Innovation />
             <Button />
             <Cleanup />
             <Compatibility />
@@ -20,6 +21,7 @@
 import Button from '@/panel/Button.vue';
 import Cleanup from '@/panel/Cleanup.vue';
 import Compatibility from '@/panel/Compatibility.vue';
+import Innovation from '@/panel/Innovation.vue';
 import Notification from '@/panel/Notification.vue';
 import Update from '@/panel/Update.vue';
 import Version from '@/panel/Version.vue';
