@@ -55,6 +55,39 @@
                 </div>
                 <p v-else class="nlkaleido-tip">尚无循环记录（开启 Agent 后产生）。</p>
             </Detail>
+
+            <Detail title="版本与更新">
+                <p class="nlkaleido-tip">
+                    当前版本 <b>{{ currentVersion }}</b>
+                    <span v-if="updateCheck">
+                        <template v-if="updateCheck.ok && updateCheck.hasUpdate">
+                            · 有新版 <b class="nlkaleido-warn">{{ updateCheck.latest }}</b>
+                        </template>
+                        <template v-else-if="updateCheck.ok">
+                            · 已是最新
+                        </template>
+                        <template v-else>
+                            · 检查失败（{{ updateCheck.error }}）
+                        </template>
+                    </span>
+                </p>
+                <button class="menu_button" :disabled="checking" @click="onCheckUpdate">
+                    {{ checking ? '检查中…' : '检查更新' }}
+                </button>
+                <button
+                    v-if="updateCheck && updateCheck.url"
+                    class="menu_button"
+                    @click="onCopyUpdateUrl"
+                >
+                    复制最新 URL
+                </button>
+                <p
+                    v-if="updateCheck && updateCheck.ok && updateCheck.hasUpdate"
+                    class="nlkaleido-tip"
+                >
+                    更新方法：把 TavernHelper 脚本地址换成上方 URL，并「重新加载」脚本即可。
+                </p>
+            </Detail>
         </template>
     </Section>
 </template>
@@ -67,6 +100,12 @@ import RangeNumber from '@/panel/component/RangeNumber.vue';
 import Section from '@/panel/component/Section.vue';
 import { getCacheMetricsState } from '@/innovation/cache_metrics_bridge';
 import { getLastAgentLoopResult } from '@/innovation/agent_update_bridge';
+import {
+    checkForUpdatesNow,
+    getLastUpdateCheck,
+    isCheckingUpdates,
+} from '@/innovation/update_check_bridge';
+import { INNOVATION_VERSION } from '@/innovation/version';
 import {
     loadInnovationSettings,
     saveInnovationSettings,
@@ -90,6 +129,25 @@ const cacheRateText = computed(() => {
     if (total <= 0) return 'N/A';
     return `${((cacheMetrics.value.hitTokens / total) * 100).toFixed(1)}%`;
 });
+
+const currentVersion = INNOVATION_VERSION;
+const updateCheck = ref(getLastUpdateCheck());
+const checking = ref(isCheckingUpdates());
+
+async function onCheckUpdate() {
+    checking.value = true;
+    updateCheck.value = await checkForUpdatesNow();
+    checking.value = isCheckingUpdates();
+}
+
+async function onCopyUpdateUrl() {
+    if (!updateCheck.value?.url) return;
+    try {
+        await navigator.clipboard.writeText(updateCheck.value.url);
+    } catch {
+        // 某些环境剪贴板不可用，忽略
+    }
+}
 
 // 周期性刷新缓存度量与循环状态
 const timer = setInterval(() => {
