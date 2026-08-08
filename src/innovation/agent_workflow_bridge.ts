@@ -640,6 +640,13 @@ export async function runAgentWorkflowForMessage(
     const settings = loadInnovationSettings(localStorage);
     if (!settings.agentEnabled) return null;
 
+    // 更新中提示（toastr 为 ST 全局；革新版自己的提示，不复用原版通知开关）
+    try {
+        toastr.info('革新版 Agent 变量更新中…', '[革新版·Agent]');
+    } catch {
+        /* toastr 不可用时忽略 */
+    }
+
     const state = extractStateText(message_id);
     if (!state) {
         // 无变量状态可更新 → 记录一个 no_change
@@ -830,12 +837,42 @@ export async function runAgentWorkflowForMessage(
 
     if (workflow_result.termination === 'error') {
         console.error('[革新版·Agent工作流] 失败', workflow_result.error);
+        try {
+            toastr.error(
+                `革新版 Agent 更新失败：${workflow_result.error ?? '未知错误'}`,
+                '[革新版·Agent]'
+            );
+        } catch {
+            /* toastr 不可用时忽略 */
+        }
+    } else if (workflow_result.termination === 'done' && entry.applied) {
+        console.debug(
+            `[革新版·Agent工作流] 阶段=${workflow_result.stages.join('→')} 终止=${workflow_result.termination} 模型调用=${(entry.decide ? 1 : 0) + entry.updates.length}次（决策${entry.decide ? 1 : 0}+更新${entry.updates.length}）`
+        );
+        try {
+            toastr.success(
+                `已更新 ${entry.due?.length ?? 0} 个变量（${entry.updates.length} 次模型调用）`,
+                '[革新版·Agent]'
+            );
+        } catch {
+            /* toastr 不可用时忽略 */
+        }
     } else {
         console.debug(
             `[革新版·Agent工作流] 阶段=${workflow_result.stages.join('→')} 终止=${workflow_result.termination} 模型调用=${(entry.decide ? 1 : 0) + entry.updates.length}次（决策${entry.decide ? 1 : 0}+更新${entry.updates.length}）`
         );
     }
     return workflow_result;
+}
+
+/**
+ * 手动重试最近一次更新（面板「重试最近一次更新」按钮）——
+ * 走革新版工作流（决策→拉取→观察→更新→校验），不复用原版额外模型解析。
+ */
+export async function retryLastAgentWorkflow(): Promise<AgentWorkflowResult | null> {
+    const message_id = getLastMessageId();
+    if (message_id === null || message_id === undefined) return null;
+    return runAgentWorkflowForMessage(message_id);
 }
 
 /**

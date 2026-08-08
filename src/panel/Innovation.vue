@@ -55,6 +55,13 @@
                     </span>
                 </div>
                 <p v-else class="nlkaleido-tip">尚无工作流记录（开启 Agent 并发送消息后产生）。</p>
+                <button
+                    class="menu_button"
+                    :disabled="retrying || !settings.agentEnabled"
+                    @click="onRetryWorkflow"
+                >
+                    {{ retrying ? '更新中…' : '重试最近一次更新' }}
+                </button>
             </Detail>
 
             <Detail title="世界书缓存池（初始化预热）">
@@ -245,6 +252,7 @@ import {
     getWorldbookPoolState,
     isWorldbookPoolLoading,
     loadWorldbookPoolNow,
+    retryLastAgentWorkflow,
 } from '@/innovation/agent_workflow_bridge';
 import {
     checkForUpdatesNow,
@@ -287,6 +295,19 @@ async function onLoadPool() {
     } finally {
         poolLoading.value = false;
         poolState.value = getWorldbookPoolState();
+    }
+}
+
+const retrying = ref(false);
+
+async function onRetryWorkflow() {
+    retrying.value = true;
+    try {
+        await retryLastAgentWorkflow();
+    } finally {
+        retrying.value = false;
+        lastWorkflow.value = getLastWorkflowResult();
+        debugLogs.value = getWorkflowDebugLogs();
     }
 }
 

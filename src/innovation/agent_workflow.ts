@@ -1019,8 +1019,27 @@ export async function runAgentWorkflow(
             base.update = update_result;
             base.retries = attempt - 1;
 
-            // 模型明确表示无更新 → done（不发应用）
-            if (!update_result.block.trim()) {
+            // 模型完全没输出（raw 与 block 都是空）→ 视为失败，喂回「输出为空」重试
+            if (!String(update_result.raw ?? '').trim() && !String(update_result.block ?? '').trim()) {
+                const reason = '模型输出为空（未返回任何内容）';
+                if (reason === last_failure_reason) {
+                    consecutive_failures++;
+                } else {
+                    consecutive_failures = 1;
+                    last_failure_reason = reason;
+                }
+                last_error = reason;
+                if (consecutive_failures >= loop_threshold) {
+                    return finish('loop_broken');
+                }
+                if (attempt > max_retries) {
+                    return finish('max_retries');
+                }
+                continue;
+            }
+
+            // 模型输出了空块（<UpdateVariable></UpdateVariable> 等）→ 明确无更新 → done
+            if (!String(update_result.block ?? '').trim()) {
                 return finish('done');
             }
 

@@ -555,6 +555,49 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
         expect(calls).toEqual(['update']);
     });
 
+    test('模型完全没输出（raw 与 block 皆空）→ 喂回「输出为空」重试，成功补上', async () => {
+        const update_calls: (string | undefined)[] = [];
+        const executor = buildExecutor({
+            update: async (_ctx, lastError) => {
+                update_calls.push(lastError);
+                // 第一次完全没输出，第二次正常输出
+                return update_calls.length === 1
+                    ? { block: '', raw: '' }
+                    : { block: "<UpdateVariable>_.set('理.好感度', 50);</UpdateVariable>", raw: 'x' };
+            },
+        });
+        const result = await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 3,
+            loopThreshold: 2,
+        });
+        expect(result.termination).toBe('done');
+        expect(result.retries).toBe(1);
+        expect(update_calls).toEqual([undefined, expect.stringContaining('输出为空')]);
+    });
+
+    test('模型持续没输出 → max_retries', async () => {
+        const executor = buildExecutor({
+            update: async () => ({ block: '', raw: '' }),
+        });
+        const result = await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 2,
+            loopThreshold: 4,
+        });
+        expect(result.termination).toBe('max_retries');
+        expect(result.retries).toBe(2);
+    });
+
+    test('模型持续没输出且连续相同 → loop_broken', async () => {
+        const executor = buildExecutor({
+            update: async () => ({ block: '', raw: '' }),
+        });
+        const result = await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 5,
+            loopThreshold: 2,
+        });
+        expect(result.termination).toBe('loop_broken');
+    });
+
     test('校验失败喂回原因重试，成功后 done', async () => {
         const update_calls: (string | undefined)[] = [];
         const executor = buildExecutor({
