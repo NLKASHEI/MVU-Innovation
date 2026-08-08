@@ -25,6 +25,11 @@ export interface WorldbookEntryLike {
     content?: string;
     comment?: string;
     world?: string;
+    /** 激活策略（灯效状态）：constant=蓝灯常驻，selective=绿灯按关键词激活，vectorized=向量 */
+    strategy?: {
+        type?: string;
+        keys?: (string | RegExp)[];
+    };
 }
 
 /** 读取结果 */

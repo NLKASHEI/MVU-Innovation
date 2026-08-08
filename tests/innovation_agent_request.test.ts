@@ -8,31 +8,41 @@ import {
 } from '@/innovation/agent_request';
 
 describe('buildDecideTask', () => {
-    test('包含剧情、变量索引与决策指令', () => {
-        const task = buildDecideTask({ story: '剧情文本', index: '理.好感度\n世界.时间' });
+    test('包含剧情、候选清单与决策指令', () => {
+        const task = buildDecideTask({ story: '剧情文本', candidates: ['理.好感度', '世界.时间'] });
         expect(task).toContain('最近剧情');
         expect(task).toContain('剧情文本');
-        expect(task).toContain('变量索引');
+        expect(task).toContain('候选清单');
         expect(task).toContain('理.好感度');
+        expect(task).toContain('世界.时间');
         expect(task).toContain('none');
     });
 
-    test('禁止输出更新块', () => {
-        const task = buildDecideTask({ story: '', index: '' });
+    test('必须逐项判断（防偷懒）', () => {
+        const task = buildDecideTask({ story: '', candidates: ['a.b'] });
+        expect(task).toContain('逐项判断，不得省略任何一行');
+        expect(task).toContain('路径: Y');
+        expect(task).toContain('路径: N');
+    });
+
+    test('禁止写候选外路径与更新块', () => {
+        const task = buildDecideTask({ story: '', candidates: ['a.b'] });
+        expect(task).toContain('候选清单之外的路径');
         expect(task).toContain('不要输出 <UpdateVariable> 更新块');
     });
 
     test('失败原因会被喂回', () => {
-        const task = buildDecideTask({ story: '', index: '', last_error: '决策路径不存在' });
+        const task = buildDecideTask({ story: '', candidates: [], last_error: '决策路径不存在' });
         expect(task).toContain('决策路径不存在');
     });
 });
 
 describe('buildDecideRawConfig', () => {
-    test('默认配置结构：任务在尾部，user_input 收尾', () => {
+    test('默认配置结构：任务在尾部，user_input 收尾，限 max_tokens', () => {
         const config = buildDecideRawConfig({ task: 'TASK' });
         expect(config.user_input).toBe('遵循<must>指令');
         expect(config.should_stream).toBe(false);
+        expect(config.max_tokens).toBe(500);
         expect(config.ordered_prompts.at(-1)).toBe('user_input');
         expect(config.ordered_prompts.at(-2).content).toContain('TASK');
     });
@@ -110,10 +120,11 @@ describe('createJsonPatchResponseSchema', () => {
 });
 
 describe('buildAgentUpdateRawConfig', () => {
-    test('默认配置结构：任务在尾部，user_input 收尾', () => {
+    test('默认配置结构：任务在尾部，user_input 收尾，限 max_tokens', () => {
         const config = buildAgentUpdateRawConfig({ task: 'TASK' });
         expect(config.user_input).toBe('遵循<must>指令');
         expect(config.should_stream).toBe(false);
+        expect(config.max_tokens).toBe(3000);
         expect(Array.isArray(config.ordered_prompts)).toBe(true);
         expect(config.ordered_prompts.at(-1)).toBe('user_input');
         // 动态任务压尾部，利于前缀缓存

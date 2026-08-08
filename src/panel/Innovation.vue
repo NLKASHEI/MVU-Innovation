@@ -57,6 +57,37 @@
                 <p v-else class="nlkaleido-tip">尚无工作流记录（开启 Agent 并发送消息后产生）。</p>
             </Detail>
 
+            <Detail title="世界书缓存池（初始化预热）">
+                <p v-if="poolState" class="nlkaleido-tip">
+                    建池 {{ formatTime(poolState.builtAt) }} ·
+                    加载「{{ poolState.loaded_names.join('、') }}」·
+                    入池 <b>{{ poolState.entries }}</b> 条目
+                    （规则 {{ poolState.rules }} ·
+                    灯效 蓝{{ poolState.strategy.constant }} / 绿{{ poolState.strategy.selective }} /
+                    向量{{ poolState.strategy.vectorized }}）·
+                    索引 规则路径{{ poolState.indexStats.rulePaths }} /
+                    精确映射{{ poolState.indexStats.rulePathToRules }} ·
+                    AI 规则分池
+                    {{
+                        poolState.aiMerged
+                            ? `已合并（${poolState.aiBatchesOk}/${poolState.aiBatchesTotal} 批，${poolState.aiDurationMs}ms）`
+                            : poolState.aiBatchesTotal > 0 && poolState.aiDurationMs > 0
+                              ? `尝试过（${poolState.aiBatchesOk}/${poolState.aiBatchesTotal} 批）`
+                              : '未触发'
+                    }}
+                </p>
+                <p v-else class="nlkaleido-tip">
+                    缓存池尚未加载（进入卡或手动加载后自动预热）。
+                </p>
+                <button class="menu_button" :disabled="poolLoading" @click="onLoadPool">
+                    {{ poolLoading ? '加载中…' : '手动加载缓存池' }}
+                </button>
+                <p class="nlkaleido-tip">
+                    进入卡时自动做 AI 规则分池（模型逐条阅读 [mvu_update] 规则条目，通常几秒）；
+                    手动按钮强制重建池并重新分池。
+                </p>
+            </Detail>
+
             <Detail title="工作流调试日志（最近 50 次运行）">
                 <div class="nlkaleido-debug-list">
                     <div
@@ -81,6 +112,12 @@
                             <span class="nlkaleido-debug-stages">{{ entry.stages.join('→') }}</span>
                         </button>
                         <div v-if="expanded[entry.id]" class="nlkaleido-debug-body">
+                            <p v-if="entry.candidates" class="nlkaleido-debug-line">
+                                <b>启发式候选</b>：{{ entry.candidates.length }} 个
+                                （规则 {{ entry.candidateSource?.from_rules ?? 0 }} +
+                                剧情 {{ entry.candidateSource?.from_story ?? 0 }}）
+                                ：{{ entry.candidates.join('、') }}
+                            </p>
                             <div v-if="entry.decide" class="nlkaleido-debug-update">
                                 <p class="nlkaleido-debug-line">
                                     <b>AI 决策</b>（{{ entry.decide.duration_ms }}ms）：决策
@@ -89,13 +126,27 @@
                                 <pre class="nlkaleido-debug-pre">{{ entry.decide.text_preview }}</pre>
                             </div>
                             <p v-if="entry.worldbook" class="nlkaleido-debug-line">
-                                <b>世界书扫描</b>：全部 {{ entry.worldbook.total_names }} 本 ·
-                                活跃 {{ entry.worldbook.active_names.length }} 本 ·
-                                加载「{{ entry.worldbook.loaded_names.join('、') }}」·
+                                <b>世界书扫描</b>（{{ entry.worldbook.duration_ms }}ms）：
+                                全部 {{ entry.worldbook.total_names }} 本 ·
+                                只读「{{ entry.worldbook.loaded_names.join('、') }}」·
                                 条目 {{ entry.worldbook.loaded_entries }} ·
                                 规则 {{ entry.worldbook.rules_matched }} 条 ·
                                 剧情 {{ entry.worldbook.plot_matched }} 条 ·
                                 回退 {{ entry.worldbook.fell_back ? '是' : '否' }}
+                            </p>
+                            <p v-if="entry.pool" class="nlkaleido-debug-line">
+                                <b>缓存池</b>：入池 {{ entry.pool.entries }} 条目
+                                （规则 {{ entry.pool.rules }} ·
+                                灯效 蓝{{ entry.pool.strategy.constant }} / 绿{{ entry.pool.strategy.selective }} /
+                                向量{{ entry.pool.strategy.vectorized }}）·
+                                索引 规则路径{{ entry.pool.indexStats.rulePaths }} /
+                                精确映射{{ entry.pool.indexStats.rulePathToRules }} /
+                                精确映射{{ entry.pool.indexStats.rulePathToRules }} ·
+                                AI 规则分池 {{ entry.pool.aiMerged ? '已合并' : '未触发' }}
+                                <span v-if="entry.pool.aiBatchesTotal > 0">
+                                    （{{ entry.pool.aiBatchesOk }}/{{ entry.pool.aiBatchesTotal }} 批，
+                                    {{ entry.pool.aiDurationMs }}ms）
+                                </span>
                             </p>
                             <p v-if="entry.due && entry.due.length" class="nlkaleido-debug-line">
                                 <b>due 候选</b>：{{ entry.due.join('、') }}
@@ -106,6 +157,9 @@
                                     （折叠 {{ entry.observation.folded }}）
                                 </span>
                                 ：{{ entry.observation.paths.join('、') }}
+                                <span v-if="entry.loreCount > 0" class="nlkaleido-debug-line">
+                                    ｜背景 {{ entry.loreCount }} 条
+                                </span>
                             </p>
                             <div
                                 v-for="upd in entry.updates"
@@ -188,6 +242,9 @@ import { getCacheMetricsState } from '@/innovation/cache_metrics_bridge';
 import {
     getLastWorkflowResult,
     getWorkflowDebugLogs,
+    getWorldbookPoolState,
+    isWorldbookPoolLoading,
+    loadWorldbookPoolNow,
 } from '@/innovation/agent_workflow_bridge';
 import {
     checkForUpdatesNow,
@@ -215,11 +272,23 @@ const cacheMetrics = ref(getCacheMetricsState());
 const lastWorkflow = ref(getLastWorkflowResult());
 const debugLogs = ref(getWorkflowDebugLogs());
 const expanded = ref<Record<number, boolean>>({});
+const poolState = ref(getWorldbookPoolState());
+const poolLoading = ref(isWorldbookPoolLoading());
 const cacheRateText = computed(() => {
     const total = cacheMetrics.value.hitTokens + cacheMetrics.value.missTokens;
     if (total <= 0) return 'N/A';
     return `${((cacheMetrics.value.hitTokens / total) * 100).toFixed(1)}%`;
 });
+
+async function onLoadPool() {
+    poolLoading.value = true;
+    try {
+        await loadWorldbookPoolNow(true);
+    } finally {
+        poolLoading.value = false;
+        poolState.value = getWorldbookPoolState();
+    }
+}
 
 function toggleDebug(id: number) {
     expanded.value[id] = !expanded.value[id];
@@ -249,11 +318,13 @@ async function onCopyUpdateUrl() {
     }
 }
 
-// 周期性刷新缓存度量、工作流状态与调试日志
+// 周期性刷新缓存度量、工作流状态、调试日志与缓存池状态
 const timer = setInterval(() => {
     cacheMetrics.value = getCacheMetricsState();
     lastWorkflow.value = getLastWorkflowResult();
     debugLogs.value = getWorkflowDebugLogs();
+    poolState.value = getWorldbookPoolState();
+    poolLoading.value = isWorldbookPoolLoading();
 }, 2000);
 
 onUnmounted(() => {

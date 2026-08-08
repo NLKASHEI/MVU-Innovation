@@ -1,9 +1,10 @@
 /**
- * [革新版·独立请求构造 v3] 纯逻辑模块。
+ * [革新版·独立请求构造 v4] 纯逻辑模块。
  *
  * agent 化工作流两种请求：
- *   - 决策（decide）：AI 基于【最近剧情 + 变量索引清单】自主决定「本轮更新哪些变量」，
- *     只输出路径清单（不产出更新块）。这是 v1.3.0「盲检查」的修复版——决策阶段有剧情上下文。
+ *   - 决策（decide）：AI 基于【最近剧情 + 启发式候选清单】逐项判断「哪些候选要更新」。
+ *     候选是本地启发式（规则路径 ∪ 剧情命中）筛过的，数量远小于全量变量——
+ *     模型必须逐项输出 Y/N（防偷懒），且只能选候选内的路径（越权本地丢弃）。
  *   - 更新（update）：AI 基于（剧情 + 观察投影 + 相关规则 + 相关背景）产出 <UpdateVariable> 块
  *     （命令方言或 JSON Patch 方言），支持 json_schema 结构化输出。
  *
@@ -13,27 +14,31 @@
  * 纯逻辑零依赖（只拼字符串/对象），可独立单测。
  */
 
-/** 决策阶段提示词：基于剧情 + 变量索引，输出「要更新哪些变量」清单 */
+/** 决策阶段提示词：对启发式候选清单逐项 Y/N 判断（防偷懒） */
 export function buildDecideTask(opts: {
     story: string;
-    index: string;
+    candidates: string[];
     last_error?: string;
 }): string {
     const parts = [
         '<must>',
-        '你是变量更新 Agent。先执行【决策】阶段：基于最近剧情与变量索引，判断哪些变量需要更新。',
-        '输出格式（每行一个变量路径 + 判断）：',
-        '  变量路径: Y    （需要更新）',
-        '  变量路径: N    （不需要更新）',
-        '若都不需要更新，只输出一行：none',
-        '不要输出解释，不要输出 <UpdateVariable> 更新块，不要写变量索引中不存在的路径。',
+        '你是变量更新 Agent。先执行【决策】阶段：基于最近剧情，判断候选清单中的哪些变量需要更新。',
+        '候选清单是本地启发式筛选出的「可能与剧情相关」的变量。',
+        '你必须对候选清单中的【每一个】路径逐行输出判断：',
+        '  路径: Y    （需要更新）',
+        '  路径: N    （不需要更新）',
+        '要求：',
+        '- 逐项判断，不得省略任何一行，不得合并输出，不得只挑几个明显的变量。',
+        '- 候选清单全部不需要更新时，才输出一行：none。',
+        '- 不要写候选清单之外的路径（越权写入会被本地引擎拒绝）。',
+        '- 不要输出解释，不要输出 <UpdateVariable> 更新块。',
         '</must>',
         '',
         '最近剧情：',
         opts.story || '（无）',
         '',
-        '变量索引（stat_data 全部变量路径）：',
-        opts.index || '（无）',
+        '候选清单（必须逐项判断）：',
+        opts.candidates.length > 0 ? opts.candidates.join('\n') : '（无）',
     ];
     if (opts.last_error) {
         parts.push('', '上次决策未通过校验，原因：' + opts.last_error, '请修正后重新输出。');
@@ -41,11 +46,17 @@ export function buildDecideTask(opts: {
     return parts.join('\n');
 }
 
-/** 构造决策阶段 generateRaw 配置（纯文本，不结构化） */
+/** 决策阶段输出 token 上限（只输出需要更新的路径，几十个字符即可） */
+export const DECIDE_MAX_TOKENS = 500;
+/** 更新阶段输出 token 上限（JSON Patch 数组，9 个变量约 1-2k token） */
+export const UPDATE_MAX_TOKENS = 3000;
+
+/** 构造决策阶段 generateRaw 配置（纯文本，不结构化；限 max_tokens 防长输出） */
 export function buildDecideRawConfig(opts: {
     task: string;
     custom_api?: Record<string, any>;
     ordered_prompts?: (string | { role: string; content: string })[];
+    max_tokens?: number;
 }): Record<string, any> {
     const ordered_prompts: (string | { role: string; content: string })[] = opts.ordered_prompts
         ? [...opts.ordered_prompts]
@@ -55,6 +66,7 @@ export function buildDecideRawConfig(opts: {
     const config: Record<string, any> = {
         user_input: '遵循<must>指令',
         should_stream: false,
+        max_tokens: opts.max_tokens ?? DECIDE_MAX_TOKENS,
         ordered_prompts,
     };
     if (opts.custom_api) {
@@ -100,6 +112,7 @@ export function buildAgentUpdateTask(opts: {
         ...format_instructions,
         '规则：',
         '- 只更新「变量观察」中列出的变量；不在列表中的变量一律不要写（越权写入会被本地引擎拒绝）。',
+        '- 对「变量观察」中的每个变量逐一判断：确实需要更新的，必须写出对应的 op，不要因为数量多而省略。',
         '- 变量路径相对于 stat_data（如 理.好感度），JSON Patch 的 path 为 JSON Pointer（如 /理/好感度）。',
         '- 若本轮无需更新任何变量，输出空数组：[]（structured 模式）或空块：<UpdateVariable></UpdateVariable>（文本模式）。',
         '</must>',
@@ -227,6 +240,7 @@ export function createJsonPatchResponseSchema(): object {
             properties: {
                 analysis: {
                     type: 'string',
+                    maxLength: 200,
                     description:
                         'Write in ENGLISH. Compactly summarize the variable update decision without revealing variable contents.',
                 },
@@ -254,6 +268,7 @@ export function buildAgentUpdateRawConfig(opts: {
     ordered_prompts?: (string | { role: string; content: string })[];
     /** 结构化输出 schema（ST 自动按 provider 转换：OpenAI → response_format，Claude → 强制工具） */
     json_schema?: object;
+    max_tokens?: number;
 }): Record<string, any> {
     const ordered_prompts: (string | { role: string; content: string })[] = opts.ordered_prompts
         ? [...opts.ordered_prompts]
@@ -263,6 +278,7 @@ export function buildAgentUpdateRawConfig(opts: {
     const config: Record<string, any> = {
         user_input: '遵循<must>指令',
         should_stream: false,
+        max_tokens: opts.max_tokens ?? UPDATE_MAX_TOKENS,
         ordered_prompts,
     };
     if (opts.custom_api) {

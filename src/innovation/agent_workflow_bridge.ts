@@ -29,8 +29,7 @@ import {
     PreparedOps,
 } from '@/innovation/agent_workflow';
 import {
-    buildAgentUpdateRawConfig,
-    buildAgentUpdateTask,
+    buildAgentUpdateRawConfig,    buildAgentUpdateTask,
     buildDecideRawConfig,
     buildDecideTask,
     createJsonPatchResponseSchema,
@@ -38,11 +37,18 @@ import {
 } from '@/innovation/agent_request';
 import {
     pickUpdateWorldbookNames,
-    selectRelevantLore,
-    selectUpdateRules,
     splitRulePlotEntries,
 } from '@/innovation/agent_worldbook';
+import {
+    buildWorldbookPool,
+    parseAiClassification,
+    poolQueryLoreByPaths,
+    poolQueryRulesByPaths,
+    AiByIndex,
+    WorldbookPool,
+} from '@/innovation/agent_worldbook_pool';
 import { updateVariables } from '@/function/update_variables';
+import { getLastValidVariable } from '@/util';
 import { loadInnovationSettings } from '@/innovation/settings';
 import { useDataStore } from '@/store';
 
@@ -71,8 +77,10 @@ export interface WorldbookScanDetail {
     rules_matched: number;
     /** [mvu_plot] 剧情条目数 */
     plot_matched: number;
-    /** 是否发生了回退读取（活跃集无规则） */
+    /** 是否发生了回退读取（绑定集无规则 → 名字启发式） */
     fell_back: boolean;
+    /** 扫描耗时 ms（本地读取+分拣；命中缓存时为 0） */
+    duration_ms: number;
 }
 
 /** 单次模型调用详情 */
@@ -98,6 +106,25 @@ export interface DecideCallDetail {
     duration_ms: number;
 }
 
+/** 缓存池详情（供调试面板） */
+export interface PoolDebugDetail {
+    /** 入池条目总数 */
+    entries: number;
+    /** 规则条目数 */
+    rules: number;
+    /** 灯效状态分布（蓝灯/绿灯/向量） */
+    strategy: { constant: number; selective: number; vectorized: number };
+    /** 是否已合并 AI 语义分池 */
+    aiMerged: boolean;
+    /** AI 规则分池耗时 ms（逐条阅读规则条目） */
+    aiDurationMs: number;
+    /** AI 分池成功批数/总批数 */
+    aiBatchesOk: number;
+    aiBatchesTotal: number;
+    /** 索引统计（rulePaths 规则路径 / rulePathToRules 精确映射） */
+    indexStats: { rulePaths: number; rulePathToRules: number };
+}
+
 /** 一次工作流运行的完整调试记录 */
 export interface WorkflowDebugEntry {
     id: number;
@@ -108,12 +135,17 @@ export interface WorkflowDebugEntry {
     retries: number;
     error?: string;
     decide: DecideCallDetail | null;
+    candidates: string[] | null;
+    candidateSource: { from_rules: number; from_story: number } | null;
     worldbook: WorldbookScanDetail | null;
+    pool: PoolDebugDetail | null;
     due: string[] | null;
     observation: { paths: string[]; folded: number } | null;
     updates: UpdateCallDetail[];
     validation_errors: string[];
     applied: boolean;
+    /** 本轮搜索到的背景条目数（按相关性打分，不固定 3 条） */
+    loreCount: number;
 }
 
 const DEBUG_LOG_MAX = 50;
@@ -187,7 +219,7 @@ function extractRecentStory(
 }
 
 // ---------------------------------------------------------------------------
-// 世界书按需读取（先读「正在用的」，规则不够再回退）
+// 世界书缓存池（初始化分类 + 灯效状态索引，之后每轮直接查池）
 // ---------------------------------------------------------------------------
 
 async function loadWorldbookEntries(name: string): Promise<any[]> {
@@ -200,8 +232,8 @@ async function loadWorldbookEntries(name: string): Promise<any[]> {
 }
 
 /**
- * 收集「正在使用的」世界书名（全局 + 角色绑定 + 聊天绑定）——
- * 这是按需读取的第一级：不加载未在用的世界书。
+ * 收集「正在使用的」世界书名（角色绑定 primary/additional + 聊天绑定 + 全局）——
+ * 只读这些，不扫描全部世界书。
  */
 function collectActiveWorldbookNames(all_names: string[]): string[] {
     const active = new Set<string>();
@@ -230,19 +262,177 @@ function collectActiveWorldbookNames(all_names: string[]): string[] {
     return all_names.filter(name => active.has(name));
 }
 
-/**
- * 读取世界书上下文（按需三级读取），并按 AI 决策路径裁剪：
- *   一级：活跃世界书（全局+角色+聊天绑定）
- *   二级（活跃集无 [mvu_update] 规则）：剩余中名字含 mvu/update/变量 的
- *   三级（仍无规则）：全部剩余
- * 规则与背景都只取与决策路径相关的（不会一股子喂给模型），并记录扫描详情（供调试面板）。
- * @param paths AI 决策的变量路径（裁剪依据）
- */
-async function readWorldbookContext(paths: string[]): Promise<{
-    rules: string[];
-    lore: string[];
+/** 缓存池状态（池 + 扫描详情；key 变化或超 TTL 才重建） */
+interface PoolState {
+    key: string;
+    builtAt: number;
+    pool: WorldbookPool;
     scan: WorldbookScanDetail;
-}> {
+    /** AI 规则分池耗时 ms（逐条阅读规则条目；失败为 0） */
+    aiDurationMs: number;
+    /** AI 分池是否已尝试过（失败不重复打） */
+    aiAttempted: boolean;
+    /** AI 分池成功批数 */
+    aiBatchesOk: number;
+    /** AI 分池总批数 */
+    aiBatchesTotal: number;
+    /** 原始加载条目（已过滤：enabled 且 content 非空；供 AI 分池时重建池） */
+    rawEntries: any[];
+}
+
+let pool_state: PoolState | null = null;
+let pool_loading = false;
+const POOL_TTL_MS = 10 * 60_000;
+
+/** 面板：缓存池是否正在加载 */
+export function isWorldbookPoolLoading(): boolean {
+    return pool_loading;
+}
+
+/** 面板：当前缓存池状态（未加载返回 null） */
+export function getWorldbookPoolState(): (PoolDebugDetail & {
+    builtAt: number;
+    loaded_names: string[];
+}) | null {
+    if (!pool_state) return null;
+    return {
+        builtAt: pool_state.builtAt,
+        loaded_names: pool_state.scan.loaded_names,
+        entries: pool_state.pool.entries.length,
+        rules: pool_state.pool.rules.length,
+        strategy: { ...pool_state.pool.strategyCount },
+        aiMerged: pool_state.pool.aiMerged,
+        aiDurationMs: pool_state.aiDurationMs,
+        aiBatchesOk: pool_state.aiBatchesOk,
+        aiBatchesTotal: pool_state.aiBatchesTotal,
+        indexStats: { ...pool_state.pool.indexStats },
+    };
+}
+
+function poolKey(active_names: string[], fallback_names: string[]): string {
+    let chat_id = '';
+    try {
+        chat_id = String(SillyTavern.getCurrentChatId() ?? '');
+    } catch {
+        /* ignore */
+    }
+    return `${chat_id}|${active_names.join(',')}|${fallback_names.join(',')}`;
+}
+
+/**
+ * AI 规则分池（v1.10.2）：让模型【逐条阅读】[mvu_update] 规则条目，输出每条规则
+ * 管辖/关联的变量路径——散文式规则（正则抓不到 `_.set`）的路径映射由 AI 语义确定。
+ *
+ * 现实依据：卡作者只写 [mvu_update] 标记，普通背景条目不写标记——AI 分池只瞄准
+ * 规则条目（通常几条到几十条 = 1-3 批、几秒）；背景条目不 AI 分池
+ * （绿灯 keys + 文本兜底足够，AI 语义归属对 ≤3 条辅助背景的收益不抵成本）。
+ *
+ * 下标约定：entries 必须是【已过滤】的可用条目（enabled !== false 且 content 非空），
+ * AI 输出序号 = 该数组下标（buildWorldbookPool 内部经 indexMap 映射，防错位）。
+ * @param entries 已过滤的可用条目（tavern-helper 形状）
+ * @returns { byIndex, batchesOk, batchesTotal, durationMs }；全批失败返回 null
+ */
+const AI_CLASSIFY_BATCH = 15;
+
+async function aiClassifyEntries(
+    entries: any[]
+): Promise<{ byIndex: AiByIndex; batchesOk: number; batchesTotal: number; durationMs: number } | null> {
+    if (entries.length === 0) return null;
+    // 只取 [mvu_update] 规则条目（idx 保持全局下标）
+    const targetIndexes: number[] = [];
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        const text = `${String(e.name ?? '')}\n${String(e.content ?? '')}`;
+        if (/\[mvu_update\]/i.test(text)) targetIndexes.push(i);
+    }
+    if (targetIndexes.length === 0) return null;
+
+    const started = Date.now();
+    const byIndex: AiByIndex = new Map();
+    let batchesOk = 0;
+    const batchesTotal = Math.ceil(targetIndexes.length / AI_CLASSIFY_BATCH);
+
+    for (let b = 0; b < batchesTotal; b++) {
+        const batchIndexes = targetIndexes.slice(b * AI_CLASSIFY_BATCH, (b + 1) * AI_CLASSIFY_BATCH);
+        const lines = batchIndexes
+            .map(
+                idx =>
+                    `[${idx}] name=${String(entries[idx].name ?? '')} content=${String(entries[idx].content ?? '').slice(0, 800)}`
+            )
+            .join('\n');
+        const task = [
+            '<must>',
+            `以下是变量更新规则条目清单（第 ${b + 1}/${batchesTotal} 批，共 ${batchIndexes.length} 条）。`,
+            '请【逐条阅读】每条规则，确定它管辖/关联的变量路径（相对于 stat_data，如 主角.境界）。',
+            '输出 JSON 数组，元素与规则一一对应：',
+            '[{"idx":0,"paths":["主角.境界"],"topic":"境界突破"},',
+            ' {"idx":1,"paths":[],"topic":""}]',
+            '要求：',
+            '- idx 必须与规则序号一致，不得遗漏任何一条，不得编造不存在的规则。',
+            '- paths 为规则管辖的变量路径；规则正文没写变量名的，凭语义推断管辖路径；',
+            '  与变量无关给空数组 []。',
+            '- 不要输出解释，只输出 JSON。',
+            '</must>',
+            '',
+            '规则条目清单：',
+            lines,
+        ].join('\n');
+        try {
+            const config = buildDecideRawConfig({ task, max_tokens: 1500 });
+            const text = normalizeGenerateText(await generateRaw(config));
+            const parsed = parseAiClassification(text, batchIndexes.length);
+            if (parsed) {
+                for (const [local_idx, paths] of parsed) {
+                    const global_idx = batchIndexes[local_idx];
+                    if (global_idx !== undefined) byIndex.set(global_idx, paths);
+                }
+                batchesOk++;
+            }
+        } catch {
+            /* 本批失败：跳过继续，不影响其余批 */
+        }
+    }
+
+    if (batchesOk === 0) return null;
+    return { byIndex, batchesOk, batchesTotal, durationMs: Date.now() - started };
+}
+
+/** AI 规则分池：让模型逐条阅读规则条目，重建池（合并规则路径精确层） */
+async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
+    if (state.pool.entries.length === 0) {
+        return { ...state, aiAttempted: true };
+    }
+    const result = await aiClassifyEntries(state.rawEntries);
+    if (!result) {
+        return {
+            ...state,
+            aiAttempted: true,
+            aiBatchesOk: 0,
+            aiBatchesTotal: Math.ceil(state.rawEntries.length / AI_CLASSIFY_BATCH),
+        };
+    }
+    const pool = buildWorldbookPool(state.rawEntries, { aiByIndex: result.byIndex });
+    return {
+        ...state,
+        pool,
+        aiDurationMs: result.durationMs,
+        aiAttempted: true,
+        aiBatchesOk: result.batchesOk,
+        aiBatchesTotal: result.batchesTotal,
+    };
+}
+
+/**
+ * 初始化/获取世界书缓存池：
+ *   1. 读世界书（绑定集 → 名字启发式唯一回退，不做全量回退）
+ *   2. 过滤可用条目（enabled 且 content 非空——AI 分池与建池共用同一数组，保证下标对齐）
+ *   3. 分好类别进池（规则/剧情/其他 + 灯效状态 + 正则索引）
+ *   4. AI 规则分池：Agent 启用或手动加载时，让模型逐条阅读 [mvu_update] 规则条目
+ *      （通常 1-3 批、几秒），补全散文规则的管辖路径；失败静默降级纯本地索引
+ * 之后每轮工作流直接查池，不再重复读取世界书（池 TTL 10 分钟）。
+ * @param force 强制重建（手动加载按钮）；AI 规则分池在 Agent 启用或手动加载时执行
+ */
+async function ensureWorldbookPool(force = false): Promise<PoolState> {
     const all_names: string[] = (() => {
         try {
             return getWorldbookNames();
@@ -251,56 +441,110 @@ async function readWorldbookContext(paths: string[]): Promise<{
         }
     })();
     const active_names = collectActiveWorldbookNames(all_names);
-    const loaded_names: string[] = [];
-    const loaded_entries: any[] = [];
-    let fell_back = false;
+    const fallback_names = pickUpdateWorldbookNames(
+        all_names.filter(name => !active_names.includes(name))
+    );
+    const key = poolKey(active_names, fallback_names);
+    const fresh =
+        pool_state !== null &&
+        pool_state.key === key &&
+        Date.now() - pool_state.builtAt < POOL_TTL_MS;
 
-    const loadAndSplit = async (names: string[]) => {
-        for (const name of names) {
-            if (loaded_names.includes(name)) continue;
-            loaded_names.push(name);
-            loaded_entries.push(...(await loadWorldbookEntries(name)));
+    // 池已新鲜：仅当 Agent 已启用且 AI 规则分池未做过时补做（如预热时 Agent 未开）
+    if (!force && fresh) {
+        if (
+            pool_state.pool.aiMerged ||
+            pool_state.aiAttempted ||
+            !loadInnovationSettings(localStorage).agentEnabled
+        ) {
+            return pool_state;
         }
-        return splitRulePlotEntries(loaded_entries);
-    };
-
-    let { rules, plot, others } = await loadAndSplit(active_names);
-
-    // 活跃集无规则 → 逐级回退（先名字启发式，再全量）
-    if (rules.length === 0) {
-        const remaining = all_names.filter(name => !loaded_names.includes(name));
-        if (remaining.length > 0) {
-            fell_back = true;
-            const heuristic = pickUpdateWorldbookNames(remaining);
-            const picked = await loadAndSplit(heuristic);
-            rules = picked.rules;
-            plot = picked.plot;
-            others = picked.others;
-        }
-        if (rules.length === 0) {
-            const rest = all_names.filter(name => !loaded_names.includes(name));
-            const picked = await loadAndSplit(rest);
-            rules = picked.rules;
-            plot = picked.plot;
-            others = picked.others;
+        pool_loading = true;
+        try {
+            const classified = await classifyPoolWithAi(pool_state);
+            pool_state = classified;
+            return classified;
+        } finally {
+            pool_loading = false;
         }
     }
 
-    // 按 AI 决策路径裁剪：规则（无匹配回退全量但限总长）+ 背景（≤3 条）
-    const rule_contents = selectUpdateRules([...rules], paths).entries;
-    const lore_entries = [...plot, ...others];
-    const lore = selectRelevantLore(lore_entries, paths);
-    const scan: WorldbookScanDetail = {
-        total_names: all_names.length,
-        active_names,
-        loaded_names,
-        loaded_entries: loaded_entries.length,
-        rules_matched: rules.length,
-        plot_matched: plot.length,
-        fell_back,
-    };
-    // lore 已按决策路径挑选（≤3 条）
-    return { rules: rule_contents, lore, scan };
+    pool_loading = true;
+    try {
+        const scanned_at = Date.now();
+        const loaded_names: string[] = [];
+        const loaded_entries: any[] = [];
+        const loadInto = async (names: string[]) => {
+            for (const name of names) {
+                if (loaded_names.includes(name)) continue;
+                loaded_names.push(name);
+                loaded_entries.push(...(await loadWorldbookEntries(name)));
+            }
+        };
+
+        await loadInto(active_names);
+        let fell_back = false;
+        // 绑定集无规则 → 名字启发式唯一回退
+        if (splitRulePlotEntries(loaded_entries).rules.length === 0 && fallback_names.length > 0) {
+            fell_back = true;
+            await loadInto(fallback_names);
+        }
+
+        // 过滤可用条目：AI 分池与建池共用同一数组（下标对齐，杜绝禁用条目错位）
+        const usable_entries = loaded_entries.filter(
+            (e: any) => e?.enabled !== false && String(e?.content ?? '').trim().length > 0
+        );
+
+        // 本地分类建池（规则/剧情/其他 + 灯效状态 + 正则索引）
+        const pool = buildWorldbookPool(usable_entries);
+        let state: PoolState = {
+            key,
+            builtAt: Date.now(),
+            pool,
+            scan: {
+                total_names: all_names.length,
+                active_names,
+                loaded_names,
+                loaded_entries: loaded_entries.length,
+                rules_matched: pool.rules.length,
+                plot_matched: pool.entries.filter(e => e.marker === 'plot').length,
+                fell_back,
+                duration_ms: Date.now() - scanned_at,
+            },
+            aiDurationMs: 0,
+            aiAttempted: false,
+            aiBatchesOk: 0,
+            aiBatchesTotal: Math.ceil(usable_entries.length / AI_CLASSIFY_BATCH),
+            rawEntries: usable_entries,
+        };
+        pool_state = state;
+
+        // AI 规则分池：Agent 启用或手动加载 → 让模型逐条阅读 [mvu_update] 规则条目
+        if (loadInnovationSettings(localStorage).agentEnabled || force) {
+            state = await classifyPoolWithAi(state);
+            pool_state = state;
+        }
+        return state;
+    } finally {
+        pool_loading = false;
+    }
+}
+
+/**
+ * 进入卡/初次加载时预热缓存池（本地分类必做；AI 规则分池按 Agent 开关自动补做）。
+ * 脚本加载与 CHAT_CHANGED 时调用，fire-and-forget。
+ */
+export function prewarmWorldbookPool(): Promise<PoolState | null> {
+    try {
+        return ensureWorldbookPool(false);
+    } catch {
+        return Promise.resolve(null);
+    }
+}
+
+/** 手动加载缓存池（强制重建 + AI 语义分池）——面板「手动加载」按钮 */
+export function loadWorldbookPoolNow(force = true): Promise<PoolState> {
+    return ensureWorldbookPool(force);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,8 +645,10 @@ export async function runAgentWorkflowForMessage(
         // 无变量状态可更新 → 记录一个 no_change
         last_workflow_result = {
             stages: [],
-            decide: null,
             rules: null,
+            candidates: null,
+            candidateSource: null,
+            decide: null,
             due: null,
             observation: null,
             update: null,
@@ -428,39 +674,75 @@ export async function runAgentWorkflowForMessage(
         stages: [],
         retries: 0,
         decide: null,
+        candidates: null,
+        candidateSource: null,
         worldbook: null,
+        pool: null,
         due: null,
         observation: null,
         updates: [],
         validation_errors: [],
         applied: false,
+        loreCount: 0,
     };
     const workflow_started = Date.now();
 
     const executor = {
-        // 阶段1 AI 自主决策：基于（剧情 + 变量索引清单）决定本轮更新哪些变量。
-        // 决策只输出路径清单，不产出更新块——世界书在此阶段【之后】才按需拉取。
-        decide: async (input: { story: string; index: string }, last_error?: string) => {
+        // 阶段0 读规则：从缓存池取全部 [mvu_update] 规则内容（零世界书读取，
+        // 池已含分类/灯效索引/AI 深化路径；首次建池时初始化）
+        readRules: async () => {
+            const state = await ensureWorldbookPool();
+            entry.worldbook = state.scan;
+            entry.pool = {
+                entries: state.pool.entries.length,
+                rules: state.pool.rules.length,
+                strategy: { ...state.pool.strategyCount },
+                aiMerged: state.pool.aiMerged,
+                aiDurationMs: state.aiDurationMs,
+                aiBatchesOk: state.aiBatchesOk,
+                aiBatchesTotal: state.aiBatchesTotal,
+                indexStats: { ...state.pool.indexStats },
+            };
+            const contents = state.pool.rules.map(r => r.content);
+            return {
+                entries: contents,
+                raw: contents.join('\n---\n'),
+                lore: [],
+                extraPaths: state.pool.rulePaths,
+            };
+        },
+        // 阶段2 AI 决策：对启发式候选清单逐项 Y/N 判断（防偷懒）。
+        // 候选已由本地启发式筛过（规则路径 ∪ AI 深化路径 ∪ 剧情命中），决策只能选候选内。
+        decide: async (input: { story: string; candidates: string[] }, last_error?: string) => {
             const call_started = Date.now();
-            const task = buildDecideTask({ story: input.story, index: input.index, last_error });
+            const task = buildDecideTask({ story: input.story, candidates: input.candidates, last_error });
             const config = buildDecideRawConfig({ task, custom_api });
             const text = normalizeGenerateText(await generateRaw(config));
             entry.decide = {
                 text_preview: preview(text, 400),
-                parsed_count: parseDecidePaths(text).length,
+                parsed_count: parseDecidePaths(text, input.candidates).length,
                 duration_ms: Date.now() - call_started,
             };
             return { text, raw: text };
         },
-        // 阶段2 按 AI 决策路径拉取世界书相应规则+背景：
-        // 按需三级读取（活跃 → 名字启发式 → 全量回退），规则与背景都按决策路径裁剪，零模型调用
-        fetchRules: async (paths: string[]) => {
-            const ctx = await readWorldbookContext(paths);
-            entry.worldbook = ctx.scan;
+        // 阶段3 按 AI 决策路径裁剪规则 + 按候选全集搜索背景（零世界书读取）：
+        // 规则先精确层（rulePathToRules 显式声明/AI 补全）再文本兜底；
+        // 背景按相关性打分（绿灯 keys +3 / 内容段 +2 / 条目名 +1），分数>0 全取，
+        // 条数 ≤10、总字符 ≤6000——要改什么就搜什么背景，不拍脑袋定 3 条
+        fetchRules: async (paths: string[], story?: string, lorePaths?: string[]) => {
+            const state = await ensureWorldbookPool();
+            entry.worldbook = state.scan;
+            const rules = poolQueryRulesByPaths(state.pool, paths);
+            const lore = poolQueryLoreByPaths(state.pool, lorePaths ?? paths, story, {
+                maxEntries: 10,
+                maxTotalChars: 6000,
+                maxEntryLength: 1000,
+            });
+            entry.loreCount = lore.length;
             return {
-                entries: ctx.rules,
-                raw: ctx.rules.join('\n---\n'),
-                lore: ctx.lore,
+                entries: rules,
+                raw: rules.join('\n---\n'),
+                lore,
             };
         },
         // 阶段4 一步 agent 回合：基于（剧情+观察+规则+背景）产出 delta。
@@ -533,6 +815,8 @@ export async function runAgentWorkflowForMessage(
     entry.stages = workflow_result.stages;
     entry.retries = workflow_result.retries;
     entry.error = workflow_result.error;
+    entry.candidates = workflow_result.candidates;
+    entry.candidateSource = workflow_result.candidateSource;
     entry.due = workflow_result.due;
     entry.observation = workflow_result.observation
         ? { paths: workflow_result.observation.paths, folded: workflow_result.observation.folded }
@@ -558,13 +842,24 @@ export async function runAgentWorkflowForMessage(
  * 初始化革新版独立 Agent 工作流监听。
  * 自己监听 MESSAGE_RECEIVED，不复用 MVU 的 onMessageReceived；
  * 是否启用完全由革新版自身设置（agentEnabled）决定，不依赖原版 MVU 的更新方式配置。
+ * 脚本加载（初次加载 MVU）与 CHAT_CHANGED（进入卡）时自动预热世界书缓存池。
  * @returns 停止函数
  */
 export function initAgentWorkflowBridge(): () => void {
+    const stops: Array<() => void> = [];
     const { stop } = eventOn(tavern_events.MESSAGE_RECEIVED, async (message_id: number) => {
         await runAgentWorkflowForMessage(message_id);
     });
+    stops.push(stop);
+
+    // 进入卡/初次加载 MVU：预热世界书缓存池（本地分类必做；AI 深化按 Agent 开关补做）
+    void prewarmWorldbookPool();
+    const { stop: stop_chat } = eventOn(tavern_events.CHAT_CHANGED, async () => {
+        void prewarmWorldbookPool();
+    });
+    stops.push(stop_chat);
+
     return () => {
-        stop();
+        stops.forEach(s => s());
     };
 }
