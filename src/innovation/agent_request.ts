@@ -117,6 +117,8 @@ export function buildUpdateMessages(opts: {
         '- 只更新「变量观察」中列出的变量；不在列表中的变量一律不要写（越权写入会被本地引擎拒绝）。',
         '- 对「变量观察」中的每个变量逐一判断：确实需要更新的，必须写出对应的 op，不要因为数量多而省略。',
         '- 变量路径相对于 stat_data（如 理.好感度），JSON Patch 的 path 为 JSON Pointer（如 /理/好感度）。',
+        '- record 动态对象（绝色榜/人物/道侣/灵宠/机遇/玉简/动向/储物袋/功法/器物/气运）：必须用【对象键】操作（如 /绝色榜/角色名、/人物/角色名/好感度），严禁数组索引与整体 replace。',
+        '- 初始化新条目：先 insert 空对象（如 /人物/角色名: {}），再 replace 填各子字段。',
         '- 若本轮无需更新任何变量，输出空数组：[]（structured 模式）或空块：<UpdateVariable></UpdateVariable>（文本模式）。',
         '</must>',
     ].join('\n');

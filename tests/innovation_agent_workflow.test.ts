@@ -388,9 +388,36 @@ describe('validateOps（权力边界）', () => {
         expect(errors.some(e => e.includes('越权'))).toBe(true);
     });
 
-    test('set 不存在路径拒绝', () => {
+    test('set 祖先路径不存在拒绝（v1.12.11：MVU _.set 全链创建，顶层都不存在才拒绝）', () => {
+        const prepared = parseDeltaBlock("<UpdateVariable>_.set('不存在.路径', 1);</UpdateVariable>");
+        const errors = validateOps(prepared, STATE, []);
+        expect(errors.some(e => e.includes('祖先'))).toBe(true);
+    });
+
+    test('set 容器内创建任意深度子字段（MVU _.set 语义，v1.12.11 修复）', () => {
         const prepared = parseDeltaBlock("<UpdateVariable>_.set('理.不存在', 1);</UpdateVariable>");
-        const errors = validateOps(prepared, STATE, ['理.好感度']);
+        expect(validateOps(prepared, STATE, ['理'])).toEqual([]);
+    });
+
+    test('replace 容器内创建任意深度子字段（初始化流程，v1.12.11 修复）', () => {
+        const state = { 人物: {} };
+        // 直接 replace 深层路径（父 姜梦 不存在）——祖先 人物 存在 → 允许（_.set 全链创建）
+        const fill = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/人物/姜梦/好感度","value":20}]</JSONPatch></UpdateVariable>'
+        );
+        expect(validateOps(fill, state, ['人物'])).toEqual([]);
+        // 同一批次 add + replace 顺序依赖也通过
+        const batch = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"add","path":"/人物/姜梦","value":{}},{"op":"replace","path":"/人物/姜梦/好感度","value":20}]</JSONPatch></UpdateVariable>'
+        );
+        expect(validateOps(batch, state, ['人物'])).toEqual([]);
+    });
+
+    test('delta/remove 仍要求路径存在', () => {
+        const delta = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"delta","path":"/人物/姜梦/好感度","value":1}]</JSONPatch></UpdateVariable>'
+        );
+        const errors = validateOps(delta, STATE, ['人物']);
         expect(errors.some(e => e.includes('不存在'))).toBe(true);
     });
 
