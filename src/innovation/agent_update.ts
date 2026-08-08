@@ -76,6 +76,28 @@ export function buildAgentFormatEmphasis(tool_name: string): string {
 }
 
 /**
+ * Agent 工具「应注册」决策结果（含原因，供面板诊断显示）。
+ */
+export interface ShouldRegisterDecision {
+    ok: boolean;
+    reason: string;
+}
+
+/**
+ * 计算 Agent 工具是否应注册（ST 每次请求都会调用 shouldRegister）。
+ * @param should_enable MVU 主开关（多实例时仅优先实例为 true）
+ * @param agent_enabled 革新版 Agent 开关
+ */
+export function evaluateAgentShouldRegister(
+    should_enable: boolean,
+    agent_enabled: boolean
+): ShouldRegisterDecision {
+    if (!should_enable) return { ok: false, reason: 'MVU 主开关未启用（should_enable=false）' };
+    if (!agent_enabled) return { ok: false, reason: '革新版 Agent 开关未开启' };
+    return { ok: true, reason: 'ok' };
+}
+
+/**
  * 判断是否应注入 Agent 工具到主模型请求。
  * @param is_agent_mode 革新版 Agent 更新开关
  * @param is_during_extra_analysis 当前是否处于额外模型解析期间（此时不应叠加主模型工具）

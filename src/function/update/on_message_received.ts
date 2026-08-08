@@ -3,6 +3,8 @@ import { isFunctionCallingSupported } from '@/function/is_function_calling_suppo
 import { invokeExtraModelWithStrategy } from '@/function/update/invoke_extra_model';
 import { handleVariablesInMessage } from '@/function/update_variables';
 import { useDataStore } from '@/store';
+import { loadInnovationSettings } from '@/innovation/settings';
+import { runAgentExtraAnalysisLoop } from '@/innovation/agent_update_bridge';
 
 export async function onMessageReceived(
     message_id: number,
@@ -48,7 +50,12 @@ export async function onMessageReceived(
         return;
     }
 
-    const result = await invokeExtraModelWithStrategy();
+    // [革新版·Agent 化更新]：开关开启时，额外模型解析升级为多轮循环（每轮基于最新变量状态再分析）。
+    // 关闭时保持原版单轮行为，完全兼容。
+    const innovation_settings = loadInnovationSettings(localStorage);
+    const result = innovation_settings.agentEnabled
+        ? await runAgentExtraAnalysisLoop(message_id)
+        : await invokeExtraModelWithStrategy();
     if (result !== null) {
         const chat_message = getChatMessages(message_id);
 
