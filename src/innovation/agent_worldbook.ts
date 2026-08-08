@@ -69,7 +69,7 @@ export function entryMentionsPath(entry: WorldbookEntryLike, path: string): bool
     const trimmed = String(path).trim();
     if (!trimmed) return false;
     // 路径各段（取最长段做包含匹配，容忍路径写法差异）
-    const segments = trimmed.split(/[.，,、\/]/).map(s => s.trim()).filter(s => s.length >= 1);
+    const segments = trimmed.split(/[.，,、/]/).map(s => s.trim()).filter(s => s.length >= 1);
     return segments.some(seg => text.includes(seg));
 }
 
@@ -124,4 +124,61 @@ export function selectUpdateRules(
  */
 export function pickUpdateWorldbookNames(names: string[]): string[] {
     return names.filter(name => /mvu|update|变量/i.test(String(name ?? '')));
+}
+
+/**
+ * 把已加载条目分成三类（「先读世界书，再读更新规则」的两级读取分拣）：
+ *   - rules：更新规则条目（[mvu_update]）
+ *   - plot：剧情条目（[mvu_plot]，作 Agent 的世界背景）
+ *   - others：其它启用条目（无标记，也作背景候选）
+ * 禁用的条目（enabled === false）一律不进任何一类。
+ * @param entries 世界书条目
+ */
+export function splitRulePlotEntries(
+    entries: WorldbookEntryLike[]
+): { rules: WorldbookEntryLike[]; plot: WorldbookEntryLike[]; others: WorldbookEntryLike[] } {
+    const rules: WorldbookEntryLike[] = [];
+    const plot: WorldbookEntryLike[] = [];
+    const others: WorldbookEntryLike[] = [];
+    for (const entry of entries) {
+        if (entry.enabled === false) continue;
+        if (isUpdateRuleEntry(entry)) {
+            rules.push(entry);
+        } else if (isPlotEntry(entry)) {
+            plot.push(entry);
+        } else {
+            others.push(entry);
+        }
+    }
+    return { rules, plot, others };
+}
+
+/**
+ * 挑选与候选路径相关的背景条目（剧情/其他），作为 Agent 的世界上下文。
+ * 「世界书读了再读更新规则」：背景只取与本次更新相关的，控制 token 成本。
+ * @param entries 背景候选（plot + others）
+ * @param paths 本轮候选路径
+ * @param max_entries 最多保留条数（默认 3）
+ * @param max_entry_length 单条截断长度（默认 2000）
+ * @returns 截断后的条目内容
+ */
+export function selectRelevantLore(
+    entries: WorldbookEntryLike[],
+    paths: string[],
+    max_entries: number = 3,
+    max_entry_length: number = 2000
+): string[] {
+    if (paths.length === 0) return [];
+    const relevant = entries.filter(entry => paths.some(path => entryMentionsPath(entry, path)));
+    return relevant
+        .slice(0, max_entries)
+        .map(entry => {
+            const name = String(entry.name ?? '').trim();
+            let content = String(entry.content ?? '').trim();
+            if (content.length > max_entry_length) {
+                content = content.slice(0, max_entry_length) + '…';
+            }
+            return name ? `${name}：${content}` : content;
+        })
+        .filter(Boolean);
 }

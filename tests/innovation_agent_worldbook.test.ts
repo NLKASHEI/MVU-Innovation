@@ -3,7 +3,9 @@ import {
     isPlotEntry,
     isUpdateRuleEntry,
     pickUpdateWorldbookNames,
+    selectRelevantLore,
     selectUpdateRules,
+    splitRulePlotEntries,
 } from '@/innovation/agent_worldbook';
 
 const update_entry = (content: string, world = 'wb') => ({
@@ -88,5 +90,60 @@ describe('pickUpdateWorldbookNames', () => {
             'mvu更新规则',
             '变量卡',
         ]);
+    });
+});
+
+describe('splitRulePlotEntries（世界书读了再读更新规则的分拣）', () => {
+    test('三类分拣 + 禁用条目排除', () => {
+        const entries = [
+            update_entry('[mvu_update] 规则A'),
+            { ...update_entry('[mvu_update] 规则B'), enabled: false },
+            update_entry('[mvu_plot] 剧情A'),
+            update_entry('普通背景A'),
+            { ...update_entry('[mvu_plot] 剧情B'), enabled: false },
+        ];
+        const { rules, plot, others } = splitRulePlotEntries(entries);
+        expect(rules).toHaveLength(1);
+        expect(rules[0].content).toContain('规则A');
+        expect(plot).toHaveLength(1);
+        expect(others).toHaveLength(1);
+        expect(others[0].content).toContain('背景A');
+    });
+
+    test('空输入返回空三类', () => {
+        expect(splitRulePlotEntries([])).toEqual({ rules: [], plot: [], others: [] });
+    });
+});
+
+describe('selectRelevantLore（按需世界书背景）', () => {
+    const lore = [
+        { name: '森林', content: '这片森林很神圣，好感度相关的传说很多', enabled: true },
+        { name: '城邦', content: '城邦的贸易规则', enabled: true },
+        { name: '好感', content: '关于好感度的世界背景', enabled: true },
+        { name: '时间', content: '时间相关的背景', enabled: true },
+    ];
+
+    test('只取与候选路径相关的背景', () => {
+        const result = selectRelevantLore(lore, ['理.好感度']);
+        expect(result.length).toBe(2); // 森林 + 好感（都提到好感度）
+        expect(result.every(r => r.includes('好感度'))).toBe(true);
+    });
+
+    test('限制条数与截断', () => {
+        const long = { name: '好感', content: '好感度背景' + 'x'.repeat(5000), enabled: true };
+        const result = selectRelevantLore([long], ['理.好感度'], 1, 100);
+        expect(result).toHaveLength(1);
+        expect(result[0]).toContain('…');
+        // 条目名前缀 + 截断内容 + 省略号
+        expect(result[0].length).toBeLessThanOrEqual(110);
+    });
+
+    test('带条目名前缀', () => {
+        const result = selectRelevantLore(lore.slice(2, 3), ['理.好感度']);
+        expect(result[0]).toContain('好感：');
+    });
+
+    test('无候选返回空', () => {
+        expect(selectRelevantLore(lore, [])).toEqual([]);
     });
 });

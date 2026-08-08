@@ -1,27 +1,26 @@
 /**
- * [革新版·Agent 工作流 v2] 单次 Agent 回合核心（纯逻辑，零 MVU 依赖）。
+ * [革新版·Agent 工作流 v3] AI 自主决策 → 按需拉取 → 一步更新（纯逻辑，零 MVU 依赖）。
  *
- * 对齐万花筒 §0.1-A / §3.4「单次模式 = 一步 agent 回合」：
- *   阶段1 读规则（read_rules）：本地读取全部 [mvu_update] 更新规则（零模型调用）
- *   阶段2 调度（due）       ：dueFields 本地确定性调度——从规则中提取本轮候选变量路径
- *                             （替代 v1 的「让模型列出全部变量 Y/N」——那是 MVU 的反面教材）
- *   阶段3 观察（observe）    ：状态投影 + 可见性控制（只暴露候选字段，截断/折叠）
- *   阶段4 更新（update）     ：一步 agent 回合——模型基于（最近剧情 + 观察 + 规则）产出 delta，应用一次
- *   阶段5 校验（validate）   ：JSON Patch 语法容错（§4.8 下放）→ 权力边界校验 → 失败原因喂回重试
+ * 对齐用户要求的 agent 化顺序：「AI 自主先决策改什么，再读什么，拉取世界书相应的」：
+ *   阶段1 决策（decide）       ：AI 基于（最近剧情 + 变量索引清单）自主决定本轮更新哪些变量
+ *   阶段2 拉取（fetch_rules）  ：按 AI 决策的路径，拉取世界书并裁剪出相应规则 + 背景（零模型调用）
+ *   阶段3 观察（observe）     ：对决策路径做状态投影（截断/折叠/只暴露决策字段）
+ *   阶段4 更新（update）      ：一步 agent 回合——模型基于（剧情+观察+规则+背景）产出 delta，应用一次
+ *   阶段5 校验（validate）    ：JSON Patch 语法容错（§4.8 下放）→ 权力边界校验（以 AI 决策路径为准）→ 失败原因喂回重试
  *
- * 与 v1（检查→读规则→更新→自检）的差异：
- *   - 删掉「模型检查阶段」：v1 的 check 请求只有 stat_data 文本、没有剧情上下文（盲人摸象），
- *     且要求模型逐行输出全部变量 Y/N（token 浪费、上下文膨胀、行为不可控）。
- *   - 候选范围由本地 dueFields 决定（防止 Agent 自行膨胀上下文，§0.2）。
- *   - 模型每轮只发 1 次请求（原 2 次），省 token；无候选直接 no_change 不发请求。
- *   - delta 解析支持命令方言（_.set 等）与 JSON Patch 方言双通道，并做语法容错（sanitizeJsonPatch）。
- *   - 校验后只允许写入「本轮调度范围」内的路径（越权写入本地拒绝）。
+ * 与 v2（读规则→本地 dueFields→观察→更新）的差异：
+ *   - 候选范围不再由本地正则从规则里猜（可能猜错/漏），而是 AI 自主决策——AI 有剧情上下文，
+ *     且能看到全部变量索引（路径清单），决策范围不受规则文本写法限制。
+ *   - 世界书在决策【之后】才按需拉取：只拉「正在用的」世界书（活跃集），
+ *     且规则/背景都按 AI 决策路径裁剪——不会把世界书一股子喂给模型。
+ *   - 模型调用：有更新时 2 次（decide + update），无更新时 1 次（decide 后 no_change）。
+ *     应用恰好一次，重试只发生在校验失败时（失败原因喂回）。
  *
  * 模型调用与变量应用全部通过 executor 注入，本模块可独立单测。
  */
 
 /** 工作流阶段 */
-export type WorkflowStage = 'read_rules' | 'due' | 'observe' | 'update' | 'validate';
+export type WorkflowStage = 'decide' | 'fetch_rules' | 'observe' | 'update' | 'validate';
 
 /** 终止原因 */
 export type AgentWorkflowTermination =
@@ -31,11 +30,13 @@ export type AgentWorkflowTermination =
     | 'loop_broken'
     | 'error';
 
-/** 阶段1 读取到的规则集 */
+/** 阶段2 拉取到的规则集（按 AI 决策路径裁剪后的产物） */
 export interface RuleSet {
-    /** 规则内容（世界书 [mvu_update] 条目正文） */
+    /** 规则内容（世界书 [mvu_update] 条目正文，已按决策路径裁剪） */
     entries: string[];
     raw: string;
+    /** 世界书背景条目（[mvu_plot] 等，已按决策路径挑选） */
+    lore?: string[];
 }
 
 /** 阶段3 观察层投影结果（§3.6 下放） */
@@ -48,15 +49,24 @@ export interface Observation {
     folded: number;
 }
 
+/** 阶段1 决策结果 */
+export interface DecideResult {
+    /** 模型决策文本（路径: Y/N 清单，供解析器提炼 paths） */
+    text: string;
+    raw: string;
+}
+
 /** 阶段4 更新上下文 */
 export interface UpdateContext {
     /** 最近剧情文本（桥接层从聊天消息提取） */
     story: string;
     /** 观察层投影文本 */
     observation: string;
-    /** 与候选路径相关的规则子集 */
+    /** 与决策路径相关的规则子集 */
     rules: string[];
-    /** 本轮候选路径（dueFields 结果） */
+    /** 与决策路径相关的世界书背景（世界书读了再读更新规则） */
+    lore: string[];
+    /** 本轮决策路径（AI 决策范围） */
     due: string[];
 }
 
@@ -106,9 +116,11 @@ export interface SelfCheckResult {
 
 /** 工作流执行器（桥接层实现，注入真实模型调用与变量应用） */
 export interface AgentWorkflowExecutor {
-    /** 阶段1：本地读取全部 [mvu_update] 更新规则（世界书，零模型调用） */
-    readRules(): Promise<RuleSet>;
-    /** 阶段4：一步 agent 回合——基于（剧情+观察+规则）产出 delta。失败原因可喂回重试 */
+    /** 阶段1：AI 自主决策——基于（剧情+变量索引）输出「要更新哪些变量」清单 */
+    decide(input: { story: string; index: string }, lastError?: string): Promise<DecideResult>;
+    /** 阶段2：按 AI 决策路径拉取世界书相应规则+背景（本地，零模型调用） */
+    fetchRules(paths: string[]): Promise<RuleSet>;
+    /** 阶段4：一步 agent 回合——基于（剧情+观察+规则+背景）产出 delta。失败原因可喂回重试 */
     update(ctx: UpdateContext, lastError?: string): Promise<UpdateResult>;
     /** 阶段5：应用校验通过的 ops 到真实变量；返回是否实际修改 */
     apply(prepared: PreparedOps): Promise<{ applied: boolean; errors?: string[] }>;
@@ -118,6 +130,7 @@ export interface AgentWorkflowExecutor {
 export interface AgentWorkflowResult {
     /** 实际经历的阶段序列（诊断用） */
     stages: WorkflowStage[];
+    decide: DecideResult | null;
     rules: RuleSet | null;
     due: string[] | null;
     observation: Observation | null;
@@ -142,6 +155,8 @@ export interface AgentWorkflowOptions {
     maxValueLen?: number;
     /** 观察层最大字段数（超出折叠，默认 60） */
     maxFields?: number;
+    /** 决策阶段变量索引上限（超出折叠，默认 200） */
+    maxIndexPaths?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,46 +205,83 @@ export function getPathValue(obj: unknown, path: string): unknown {
 }
 
 // ---------------------------------------------------------------------------
-// 阶段2 dueFields：本地确定性调度（从规则中提取候选路径）
+// 阶段1 决策：变量索引 + 决策清单解析（AI 自主决策，取代本地正则猜路径）
 // ---------------------------------------------------------------------------
 
-const COMMAND_PATH_RE = /_\.(?:set|insert|assign|remove|unset|delete|add)\s*\(\s*(['"])([^'"]+)\1/g;
-const DOTTED_PATH_RE = /(?:stat_data\.)?([\p{L}\p{N}_][\p{L}\p{N}_-]*(?:\.[\p{L}\p{N}_][\p{L}\p{N}_-]*)+)/gu;
-function looksLikePath(token: string): boolean {
-    const segments = token.split('.').map(s => s.trim()).filter(Boolean);
-    if (segments.length < 2) return false;
-    // 纯数字路径（如 1.0）不是变量路径
-    return !segments.every(s => /^\d+$/.test(s));
-}
-
 /**
- * dueFields 本地调度（万花筒 §0.2 下放）：
- * 从 [mvu_update] 规则内容中确定性提取「本轮候选变量路径」。
- * 候选范围 = 规则声明涉及的路径——Agent 无权自行扩大范围。
- * @param rules 规则内容数组
- * @returns 候选路径（已去掉 stat_data. 前缀，去重保序）
+ * 枚举 stat_data 的叶子路径，生成紧凑的「变量索引」文本（供决策阶段）。
+ * 只列路径名（不列值）：决策 = 判断「剧情里发生了什么 → 哪些变量相关」，
+ * 具体值在更新阶段由观察层投影给出（省 token）。
+ * @param state stat_data 对象
+ * @param max_paths 索引上限（超出折叠为摘要行，默认 200）
  */
-export function extractDuePaths(rules: string[]): string[] {
-    const paths: string[] = [];
-    const push = (path: string) => {
-        const normalized = normalizePath(path);
-        // 跳过内建前缀（_.set 等命令文本）与空串
-        if (normalized.startsWith('_')) return;
-        if (normalized && looksLikePath(normalized) && !paths.includes(normalized)) {
-            paths.push(normalized);
+export function buildVariableIndex(state: unknown, max_paths: number = 200): string {
+    const lines: string[] = [];
+    const total_count = { value: 0 };
+    const walk = (obj: unknown, prefix: string) => {
+        if (obj == null || typeof obj !== 'object') return;
+        for (const [key, value] of Object.entries(obj)) {
+            if (key.startsWith('$')) continue; // 跳过 $internal 等内部字段
+            const path = prefix ? `${prefix}.${key}` : key;
+            if (value != null && typeof value === 'object' && !Array.isArray(value)) {
+                walk(value, path);
+            } else {
+                total_count.value++;
+                if (lines.length < max_paths) {
+                    lines.push(path);
+                }
+            }
         }
     };
-    for (const rule of rules) {
-        if (!rule) continue;
-        // 1. 命令中的路径参数（_._.set('path', ...)）
-        for (const m of rule.matchAll(COMMAND_PATH_RE)) {
-            push(m[2]);
+    walk(state, '');
+    if (lines.length === 0) return '';
+    let text = lines.join('\n');
+    const hidden = total_count.value - lines.length;
+    if (hidden > 0) {
+        text += `\n…（另有 ${hidden} 个变量未列出）`;
+    }
+    return text;
+}
+
+const DECIDE_NONE_RE = /^(?:none|no|nothing|无|无需|无变化|不更新|都不需要|没有|0)$/i;
+
+/**
+ * 解析 AI 决策文本，提炼「要更新的变量路径」清单。
+ * 支持：
+ *   - 每行 `路径: Y/N`（Y 需要更新，N 跳过）
+ *   - 每行 `- 路径` / 裸路径（决策清单上下文视为需要更新）
+ *   - 整行 `none / 无 / 无变化` → 无更新（v1 曾把 none 误当路径的 bug 已修）
+ * @returns 决策路径数组（去重保序）
+ */
+export function parseDecidePaths(raw: string): string[] {
+    if (!raw) return [];
+    const paths: string[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        // 整行「无更新」声明 → 清空并短路（防止把 none 当路径）
+        if (DECIDE_NONE_RE.test(trimmed) || DECIDE_NONE_RE.test(trimmed.replace(/^[-*•]\s*/, ''))) {
+            return [];
         }
-        // 2. 规则正文中的点分路径（如「当 理.好感度 低于 30」）
-        for (const m of rule.matchAll(DOTTED_PATH_RE)) {
-            push(m[1]);
+        // `路径: Y` / `路径 : Y` / `路径：Y`
+        const judge = trimmed.match(/^(.+?)\s*[:：]\s*(Y|N|YES|NO|y|n|是|否)\s*$/i);
+        if (judge) {
+            const path = judge[1].trim();
+            const verdict = judge[2].toUpperCase();
+            if (path && (verdict === 'Y' || verdict === 'YES' || verdict === '是')) {
+                const normalized = normalizePath(path);
+                if (normalized && !paths.includes(normalized)) paths.push(normalized);
+            }
+            continue;
+        }
+        // `- 路径` 或裸路径
+        const bare = trimmed.replace(/^[-*•]\s*/, '').trim();
+        if (bare && !/^(决策|清单|Decide|List|更新|Update|变量)/i.test(bare)) {
+            const normalized = normalizePath(bare);
+            if (normalized && !paths.includes(normalized)) paths.push(normalized);
         }
     }
+    // 去重保序（兜底）
     return paths;
 }
 
@@ -248,6 +300,39 @@ export function filterRelevantRules(rules: string[], paths: string[]): string[] 
             return key ? rule.includes(key) : false;
         });
     });
+}
+
+/**
+ * 过滤出与候选路径相关的世界书背景条目（「世界书读了再读更新规则」：
+ * 背景只取相关的，控制 token 成本）。
+ * @param lore 世界书背景条目内容（RuleSet.lore）
+ * @param paths 本轮候选路径
+ * @param max_entries 最多保留条数（默认 3）
+ * @param max_entry_length 单条截断长度（默认 2000）
+ */
+export function filterRelevantLore(
+    lore: string[],
+    paths: string[],
+    max_entries: number = 3,
+    max_entry_length: number = 2000
+): string[] {
+    if (paths.length === 0) return [];
+    const relevant = lore.filter(entry => {
+        if (!entry) return false;
+        return paths.some(path => {
+            const segments = splitPath(path);
+            const key = segments
+                .map(s => s.trim())
+                .filter(Boolean)
+                .sort((a, b) => b.length - a.length)[0];
+            return key ? entry.includes(key) : false;
+        });
+    });
+    return relevant
+        .slice(0, max_entries)
+        .map(entry =>
+            entry.length > max_entry_length ? entry.slice(0, max_entry_length) + '…' : entry
+        );
 }
 
 // ---------------------------------------------------------------------------
@@ -698,9 +783,10 @@ export function parseDeltaBlock(block: string): { commands: ParsedCommand[]; pat
 // ---------------------------------------------------------------------------
 
 /**
- * 运行革新版单次 Agent 回合工作流。
- * 本地调度决定候选（无候选不发模型请求）；模型只发一次更新请求；
- * 校验失败把原因喂回重试（maxRetries 护栏）；连续相同失败熔断（loop_broken）。
+ * 运行革新版 agent 化工作流：
+ *   AI 自主决策（decide）→ 按决策拉取世界书（fetch_rules）→ 观察投影（observe）
+ *   → 一步更新（update，失败原因喂回重试）→ 校验（validate，连续相同失败熔断）。
+ * 模型调用：有更新 2 次（decide + update），决策无变化 1 次（decide 后 no_change）。
  */
 export async function runAgentWorkflow(
     executor: AgentWorkflowExecutor,
@@ -714,6 +800,7 @@ export async function runAgentWorkflow(
     const stages: WorkflowStage[] = [];
     const base: AgentWorkflowResult = {
         stages,
+        decide: null,
         rules: null,
         due: null,
         observation: null,
@@ -731,19 +818,24 @@ export async function runAgentWorkflow(
     });
 
     try {
-        // ---- 阶段1 读规则（本地） ----
-        stages.push('read_rules');
-        const rules = await executor.readRules();
-        base.rules = rules;
-        if (rules.entries.length === 0) return finish('no_change');
-
-        // ---- 阶段2 dueFields 本地调度 ----
-        stages.push('due');
-        const due = extractDuePaths(rules.entries);
+        // ---- 阶段1 AI 自主决策：基于剧情 + 变量索引，决定本轮更新哪些变量 ----
+        stages.push('decide');
+        const index = buildVariableIndex(input.state, options.maxIndexPaths);
+        const decide_result = await executor.decide({ story: input.story, index }, undefined);
+        base.decide = decide_result;
+        const due = parseDecidePaths(decide_result.text);
         base.due = due;
-        if (due.length === 0) return finish('no_change');
+        if (due.length === 0) {
+            // AI 决策无变化 → 直接终止，不发更新请求
+            return finish('no_change');
+        }
 
-        // ---- 阶段3 观察层投影 ----
+        // ---- 阶段2 按决策路径拉取世界书相应规则+背景（本地，零模型调用） ----
+        stages.push('fetch_rules');
+        const rules = await executor.fetchRules(due);
+        base.rules = rules;
+
+        // ---- 阶段3 观察层投影（只投影决策路径的值） ----
         stages.push('observe');
         const observation = buildObservation(input.state, due, {
             maxValueLen: options.maxValueLen,
@@ -752,10 +844,7 @@ export async function runAgentWorkflow(
         base.observation = observation;
         if (observation.paths.length === 0) return finish('no_change');
 
-        // 与候选相关的规则子集（不把全量规则塞进请求）
-        const relevant_rules = filterRelevantRules(rules.entries, due);
-
-        // ---- 阶段4 + 阶段5：一步 agent 回合 + 校验（失败喂回重试） ----
+        // ---- 阶段4 + 阶段5：一步更新 + 校验（失败喂回重试） ----
         let last_error: string | undefined;
         let consecutive_failures = 0;
         let last_failure_reason: string | undefined;
@@ -763,7 +852,8 @@ export async function runAgentWorkflow(
         const ctx: UpdateContext = {
             story: input.story,
             observation: observation.text,
-            rules: relevant_rules,
+            rules: rules.entries,
+            lore: rules.lore ?? [],
             due,
         };
 

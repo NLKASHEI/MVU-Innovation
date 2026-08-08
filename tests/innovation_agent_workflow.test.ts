@@ -2,8 +2,10 @@ import {
     AgentWorkflowExecutor,
     AgentWorkflowResult,
     buildObservation,
-    extractDuePaths,
+    buildVariableIndex,
+    filterRelevantLore,
     filterRelevantRules,
+    parseDecidePaths,
     parseDeltaBlock,
     runAgentWorkflow,
     sanitizeJsonPatch,
@@ -14,7 +16,11 @@ const STATE = { 理: { 好感度: 42, 心情: '开心' }, 世界: { 时间: '19:
 
 function buildExecutor(overrides: Partial<AgentWorkflowExecutor> = {}): AgentWorkflowExecutor {
     return {
-        readRules: async () => ({ entries: ['理.好感度 每轮更新'], raw: '理.好感度 每轮更新' }),
+        decide: async () => ({ text: '理.好感度: Y\n世界.时间: N', raw: '' }),
+        fetchRules: async () => ({
+            entries: ['理.好感度 每轮更新'],
+            raw: '理.好感度 每轮更新',
+        }),
         update: async () => ({
             block: "<UpdateVariable>_.set('理.好感度', 50);</UpdateVariable>",
             raw: '',
@@ -24,27 +30,65 @@ function buildExecutor(overrides: Partial<AgentWorkflowExecutor> = {}): AgentWor
     };
 }
 
-describe('extractDuePaths（dueFields 本地调度）', () => {
-    test('从 _.set 命令提取路径', () => {
+describe('buildVariableIndex（决策阶段变量索引）', () => {
+    test('枚举叶子路径', () => {
+        expect(buildVariableIndex(STATE)).toContain('理.好感度');
+        expect(buildVariableIndex(STATE)).toContain('理.心情');
+        expect(buildVariableIndex(STATE)).toContain('世界.时间');
+    });
+
+    test('跳过 $ 内部字段', () => {
         expect(
-            extractDuePaths(["_.set('理.好感度', 5); _.set('世界.时间','19:30');"])
+            buildVariableIndex({ 理: { 好感度: 1 }, $internal: { display_data: {} } })
+        ).not.toContain('$internal');
+    });
+
+    test('空状态返回空串', () => {
+        expect(buildVariableIndex({})).toBe('');
+        expect(buildVariableIndex(null)).toBe('');
+    });
+
+    test('超限折叠', () => {
+        const big: Record<string, Record<string, number>> = { a: {} };
+        for (let i = 0; i < 300; i++) big.a[`p${i}`] = i;
+        const index = buildVariableIndex(big, 50);
+        expect(index).toContain('另有 250 个变量未列出');
+        expect(index.split('\n').length).toBeLessThanOrEqual(52);
+    });
+});
+
+describe('parseDecidePaths（AI 决策清单解析）', () => {
+    test('解析 Y/N 判断', () => {
+        expect(
+            parseDecidePaths('理.好感度: Y\n理.心情: N\n世界.时间: Y')
         ).toEqual(['理.好感度', '世界.时间']);
     });
 
-    test('支持 stat_data. 前缀并归一化', () => {
-        expect(extractDuePaths(['stat_data.理.好感度 每轮更新'])).toEqual(['理.好感度']);
+    test('支持是/否 与冒号变体', () => {
+        expect(parseDecidePaths('理.好感度：是\n世界.时间 : 否')).toEqual(['理.好感度']);
     });
 
-    test('支持规则正文中的点分路径', () => {
-        expect(extractDuePaths(['当 理.心情 低于 30 时更新'])).toEqual(['理.心情']);
+    test('裸路径视为需更新', () => {
+        expect(parseDecidePaths('- 理.好感度\n- 世界.时间')).toEqual(['理.好感度', '世界.时间']);
     });
 
-    test('忽略纯数字路径与无点内容，去重保序', () => {
-        expect(extractDuePaths(['a.b 1.0 a.b a.c 简单文本'])).toEqual(['a.b', 'a.c']);
+    test('none/无 声明 → 空清单（v1 曾把 none 当路径的 bug）', () => {
+        expect(parseDecidePaths('none')).toEqual([]);
+        expect(parseDecidePaths('无变化')).toEqual([]);
+        expect(parseDecidePaths('- none')).toEqual([]);
+        expect(parseDecidePaths('理.好感度: N\nnone')).toEqual([]);
     });
 
-    test('空规则返回空数组', () => {
-        expect(extractDuePaths([])).toEqual([]);
+    test('空文本返回空数组', () => {
+        expect(parseDecidePaths('')).toEqual([]);
+        expect(parseDecidePaths('   ')).toEqual([]);
+    });
+
+    test('stat_data. 前缀归一化 + 去重保序', () => {
+        expect(parseDecidePaths('stat_data.理.好感度: Y\n理.好感度: Y\n世界.时间: Y')).toEqual([
+            '理.好感度',
+            '世界.时间',
+        ]);
     });
 });
 
@@ -55,6 +99,22 @@ describe('filterRelevantRules', () => {
     });
     test('无候选返回空', () => {
         expect(filterRelevantRules(['a'], [])).toEqual([]);
+    });
+});
+
+describe('filterRelevantLore（世界书读了再读更新规则）', () => {
+    test('只保留与候选路径相关的背景', () => {
+        const lore = ['森林的传说：好感度神圣', '城邦的贸易规则', '时间的流逝'];
+        expect(filterRelevantLore(lore, ['理.好感度'])).toEqual(['森林的传说：好感度神圣']);
+    });
+    test('限制条数与截断', () => {
+        const lore = ['a'.repeat(5000), '好感度相关'];
+        const result = filterRelevantLore(lore, ['理.好感度'], 1, 100);
+        expect(result).toHaveLength(1);
+        expect(result[0].length).toBeLessThanOrEqual(101);
+    });
+    test('无候选返回空', () => {
+        expect(filterRelevantLore(['x'], [])).toEqual([]);
     });
 });
 
@@ -258,12 +318,16 @@ describe('validateOps（权力边界）', () => {
     });
 });
 
-describe('runAgentWorkflow 单次 Agent 回合', () => {
-    test('正常流程：读规则→调度→观察→一步更新→校验→应用，done，只更新一次', async () => {
+describe('runAgentWorkflow agent 化工作流（决策→拉取→观察→更新→校验）', () => {
+    test('正常流程：决策→拉取→观察→一步更新→校验→应用，done，只更新一次', async () => {
         const calls: string[] = [];
         const executor = buildExecutor({
-            readRules: async () => {
-                calls.push('read');
+            decide: async () => {
+                calls.push('decide');
+                return { text: '理.好感度: Y', raw: '' };
+            },
+            fetchRules: async () => {
+                calls.push('fetch');
                 return { entries: ['理.好感度 每轮更新'], raw: '' };
             },
             update: async () => {
@@ -281,18 +345,22 @@ describe('runAgentWorkflow 单次 Agent 回合', () => {
             loopThreshold: 2,
         });
         expect(result.termination).toBe('done');
-        expect(calls).toEqual(['read', 'update', 'apply']);
-        expect(result.stages).toEqual(['read_rules', 'due', 'observe', 'update', 'validate']);
+        expect(calls).toEqual(['decide', 'fetch', 'update', 'apply']);
+        expect(result.stages).toEqual(['decide', 'fetch_rules', 'observe', 'update', 'validate']);
         expect(result.due).toEqual(['理.好感度']);
         expect(result.observation?.paths).toEqual(['理.好感度']);
         expect(result.retries).toBe(0);
     });
 
-    test('无规则 → no_change，不调模型', async () => {
+    test('AI 决策无变化 → no_change，不拉世界书不更新', async () => {
         const calls: string[] = [];
         const executor = buildExecutor({
-            readRules: async () => {
-                calls.push('read');
+            decide: async () => {
+                calls.push('decide');
+                return { text: '理.好感度: N\nnone', raw: '' };
+            },
+            fetchRules: async () => {
+                calls.push('fetch');
                 return { entries: [], raw: '' };
             },
             update: async () => {
@@ -305,36 +373,17 @@ describe('runAgentWorkflow 单次 Agent 回合', () => {
             loopThreshold: 2,
         });
         expect(result.termination).toBe('no_change');
-        expect(calls).toEqual(['read']);
+        expect(calls).toEqual(['decide']);
     });
 
-    test('规则无候选路径 → no_change', async () => {
-        const calls: string[] = [];
+    test('决策路径在状态中不存在 → 观察为空 → no_change', async () => {
         const executor = buildExecutor({
-            readRules: async () => {
-                calls.push('read');
-                return { entries: ['无关内容，没有变量路径'], raw: '' };
-            },
+            decide: async () => ({ text: '不存在.路径: Y', raw: '' }),
             update: async () => {
-                calls.push('update');
-                return { block: 'x', raw: '' };
+                throw new Error('不应调用更新');
             },
         });
         const result = await runAgentWorkflow(executor, { state: STATE, story: '' }, {
-            maxRetries: 3,
-            loopThreshold: 2,
-        });
-        expect(result.termination).toBe('no_change');
-        expect(calls).toEqual(['read']);
-    });
-
-    test('观察无字段（状态里没有候选）→ no_change', async () => {
-        const executor = buildExecutor({
-            update: async () => {
-                throw new Error('不应调用模型');
-            },
-        });
-        const result = await runAgentWorkflow(executor, { state: {}, story: '' }, {
             maxRetries: 3,
             loopThreshold: 2,
         });
@@ -431,6 +480,27 @@ describe('runAgentWorkflow 单次 Agent 回合', () => {
         expect(result.termination).toBe('done');
     });
 
+    test('世界书背景（lore）随 fetchRules 传入 update', async () => {
+        let received_lore: string[] | undefined;
+        const executor = buildExecutor({
+            fetchRules: async () => ({
+                entries: ['理.好感度 每轮更新'],
+                raw: '',
+                lore: ['森林的传说：好感度神圣'],
+            }),
+            update: async ctx => {
+                received_lore = ctx.lore;
+                return { block: "<UpdateVariable>_.set('理.好感度', 50);</UpdateVariable>", raw: '' };
+            },
+        });
+        await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 3,
+            loopThreshold: 2,
+        });
+        // fetchRules 已按决策路径裁剪（核心不再重复过滤）
+        expect(received_lore).toEqual(['森林的传说：好感度神圣']);
+    });
+
     test('executor 抛异常 → error', async () => {
         const executor = buildExecutor({
             update: async () => {
@@ -452,6 +522,6 @@ describe('runAgentWorkflow 单次 Agent 回合', () => {
             { maxRetries: 3, loopThreshold: 2 }
         );
         expect(result.elapsed_ms).toBeGreaterThanOrEqual(0);
-        expect(result.stages).toContain('observe');
+        expect(result.stages).toContain('decide');
     });
 });

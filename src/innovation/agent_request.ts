@@ -1,13 +1,11 @@
 /**
- * [革新版·独立请求构造 v2] 纯逻辑模块。
+ * [革新版·独立请求构造 v3] 纯逻辑模块。
  *
- * 对齐万花筒 §3.4「单次模式 = 一步 agent 回合」：不再有独立的「检查」模型请求
- * （v1 的检查请求只有变量状态文本、没有剧情上下文，是盲人摸象；且要求模型
- * 逐行列出全部变量 Y/N，是 MVU 的反面教材）。候选范围改由本地 dueFields 调度
- * （见 agent_workflow.ts），模型每轮只发一次「更新」请求：
- *
- *   最近剧情（story，桥接层从聊天消息提取） + 观察层投影（observation） + 相关规则
- *   → 模型输出 <UpdateVariable> 块（命令方言或 JSON Patch 方言）
+ * agent 化工作流两种请求：
+ *   - 决策（decide）：AI 基于【最近剧情 + 变量索引清单】自主决定「本轮更新哪些变量」，
+ *     只输出路径清单（不产出更新块）。这是 v1.3.0「盲检查」的修复版——决策阶段有剧情上下文。
+ *   - 更新（update）：AI 基于（剧情 + 观察投影 + 相关规则 + 相关背景）产出 <UpdateVariable> 块
+ *     （命令方言或 JSON Patch 方言），支持 json_schema 结构化输出。
  *
  * 请求构造直接按 tavern-helper 底层 generateRaw 的 GenerateRawConfig 构造，
  * 动态内容（任务）压尾部，利于前缀缓存。
@@ -15,11 +13,62 @@
  * 纯逻辑零依赖（只拼字符串/对象），可独立单测。
  */
 
+/** 决策阶段提示词：基于剧情 + 变量索引，输出「要更新哪些变量」清单 */
+export function buildDecideTask(opts: {
+    story: string;
+    index: string;
+    last_error?: string;
+}): string {
+    const parts = [
+        '<must>',
+        '你是变量更新 Agent。先执行【决策】阶段：基于最近剧情与变量索引，判断哪些变量需要更新。',
+        '输出格式（每行一个变量路径 + 判断）：',
+        '  变量路径: Y    （需要更新）',
+        '  变量路径: N    （不需要更新）',
+        '若都不需要更新，只输出一行：none',
+        '不要输出解释，不要输出 <UpdateVariable> 更新块，不要写变量索引中不存在的路径。',
+        '</must>',
+        '',
+        '最近剧情：',
+        opts.story || '（无）',
+        '',
+        '变量索引（stat_data 全部变量路径）：',
+        opts.index || '（无）',
+    ];
+    if (opts.last_error) {
+        parts.push('', '上次决策未通过校验，原因：' + opts.last_error, '请修正后重新输出。');
+    }
+    return parts.join('\n');
+}
+
+/** 构造决策阶段 generateRaw 配置（纯文本，不结构化） */
+export function buildDecideRawConfig(opts: {
+    task: string;
+    custom_api?: Record<string, any>;
+    ordered_prompts?: (string | { role: string; content: string })[];
+}): Record<string, any> {
+    const ordered_prompts: (string | { role: string; content: string })[] = opts.ordered_prompts
+        ? [...opts.ordered_prompts]
+        : [];
+    ordered_prompts.push({ role: 'system', content: opts.task });
+    ordered_prompts.push('user_input');
+    const config: Record<string, any> = {
+        user_input: '遵循<must>指令',
+        should_stream: false,
+        ordered_prompts,
+    };
+    if (opts.custom_api) {
+        config.custom_api = opts.custom_api;
+    }
+    return config;
+}
+
 /** 更新阶段提示词：基于剧情 + 观察 + 规则产出 delta（一步 agent 回合） */
 export function buildAgentUpdateTask(opts: {
     story: string;
     observation: string;
     rules: string[];
+    lore?: string[];
     last_error?: string;
     /** 结构化输出模式（配合 json_schema）：要求模型输出 {analysis, json_patch} JSON */
     structured?: boolean;
@@ -63,6 +112,9 @@ export function buildAgentUpdateTask(opts: {
     ];
     if (opts.rules.length > 0) {
         parts.push('', '相关更新规则：', opts.rules.join('\n---\n'));
+    }
+    if (opts.lore && opts.lore.length > 0) {
+        parts.push('', '相关世界书背景（理解世界用，不是更新规则）：', opts.lore.join('\n---\n'));
     }
     if (opts.last_error) {
         parts.push('', '上次输出未通过本地校验，原因：' + opts.last_error, '请修正后重新输出。');

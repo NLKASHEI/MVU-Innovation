@@ -1,9 +1,52 @@
 import {
     buildAgentUpdateRawConfig,
     buildAgentUpdateTask,
+    buildDecideRawConfig,
+    buildDecideTask,
     createJsonPatchResponseSchema,
     normalizeGenerateText,
 } from '@/innovation/agent_request';
+
+describe('buildDecideTask', () => {
+    test('包含剧情、变量索引与决策指令', () => {
+        const task = buildDecideTask({ story: '剧情文本', index: '理.好感度\n世界.时间' });
+        expect(task).toContain('最近剧情');
+        expect(task).toContain('剧情文本');
+        expect(task).toContain('变量索引');
+        expect(task).toContain('理.好感度');
+        expect(task).toContain('none');
+    });
+
+    test('禁止输出更新块', () => {
+        const task = buildDecideTask({ story: '', index: '' });
+        expect(task).toContain('不要输出 <UpdateVariable> 更新块');
+    });
+
+    test('失败原因会被喂回', () => {
+        const task = buildDecideTask({ story: '', index: '', last_error: '决策路径不存在' });
+        expect(task).toContain('决策路径不存在');
+    });
+});
+
+describe('buildDecideRawConfig', () => {
+    test('默认配置结构：任务在尾部，user_input 收尾', () => {
+        const config = buildDecideRawConfig({ task: 'TASK' });
+        expect(config.user_input).toBe('遵循<must>指令');
+        expect(config.should_stream).toBe(false);
+        expect(config.ordered_prompts.at(-1)).toBe('user_input');
+        expect(config.ordered_prompts.at(-2).content).toContain('TASK');
+    });
+
+    test('支持 custom_api 与自定义 ordered_prompts 前缀', () => {
+        const config = buildDecideRawConfig({
+            task: 'T',
+            custom_api: { apiurl: 'http://x' },
+            ordered_prompts: ['chat_history'],
+        });
+        expect(config.custom_api).toEqual({ apiurl: 'http://x' });
+        expect(config.ordered_prompts[0]).toBe('chat_history');
+    });
+});
 
 describe('buildAgentUpdateTask', () => {
     test('包含剧情、观察与规则', () => {
@@ -31,6 +74,17 @@ describe('buildAgentUpdateTask', () => {
             { story: '', observation: '', rules: [], last_error: '越权路径' },
         );
         expect(task).toContain('越权路径');
+    });
+
+    test('包含相关世界书背景（世界书读了再读更新规则）', () => {
+        const task = buildAgentUpdateTask({
+            story: '',
+            observation: '',
+            rules: ['rule1'],
+            lore: ['森林的传说：好感度神圣'],
+        });
+        expect(task).toContain('相关世界书背景');
+        expect(task).toContain('森林的传说：好感度神圣');
     });
 
     test('structured 模式要求结构化 JSON 输出', () => {
