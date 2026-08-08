@@ -139,9 +139,12 @@ export interface SelfCheckResult {
 export interface AgentWorkflowExecutor {
     /** 阶段0：本地读取全部 [mvu_update] 规则内容（世界书，零模型调用，带缓存） */
     readRules(): Promise<RuleSet>;
-    /** 阶段1：AI 在启发式候选清单内逐项决策——输出「哪些候选要更新」 */
+    /**
+     * 阶段1：AI 基于（剧情 + 规则全文 + 候选清单）输出要更新的路径（只列 Y）。
+     * 规则全文直接喂给模型（通用化：不解析规则→路径，格式千奇百怪都行）。
+     */
     decide(
-        input: { story: string; candidates: string[]; mandatory?: string[] },
+        input: { story: string; candidates: string[]; rules: string[] },
         lastError?: string
     ): Promise<DecideResult>;
     /**
@@ -934,51 +937,30 @@ export async function runAgentWorkflow(
         const rules = await executor.readRules();
         base.rules = rules;
 
-        // ---- 阶段1 启发式候选搜索（本地）：AI 分池规则路径 ∪ 剧情命中路径 ----
+        // ---- 阶段1 候选搜索（本地）：剧情命中 ∪ ZOD 变量全集（存在性校验） ----
+        // v2.0.8 通用化：不再解析规则→路径（AI 分池/本地段解析都对格式敏感、模型要求高），
+        // 规则全文直接喂给决策阶段（executor.decide 的 rules），模型结合剧情自行判断
+        // 哪些变量相关、哪些标注必须——候选范围 = ZOD 变量仓库全集 + 剧情命中。
         stages.push('candidate_search');
-        // 规则路径唯一来源 = AI 规则分池（worldbook_pool 经 extraPaths 传入）；无正则提取
-        const rule_paths = rules.extraPaths ?? [];
+        const rule_paths = rules.extraPaths ?? []; // 桥接层传 ZOD 变量全集
         const { candidates, from_rules, from_story } = searchCandidates(
             input.state,
             input.story,
             rule_paths,
-            { maxCandidates: options.maxCandidates }
+            { maxCandidates: options.maxCandidates ?? 300 } // ZOD 全集场景放宽上限
         );
-        // 强制更新路径（通用机制）：规则标 MANDATORY/必须/每轮 → 每轮必进候选
-        // （存在性校验，防 AI 编造/旧数据；决策任务会标注「必须更新」防偷懒）
-        for (const path of rules.mandatoryPaths ?? []) {
-            const normalized = normalizePath(path);
-            if (!normalized) continue;
-            if (getPathValue(input.state, normalized) === undefined) continue;
-            if (!candidates.includes(normalized)) candidates.push(normalized);
-        }
-        // ZOD 变量仓库兜底：AI 分池失败/剧情未命中（候选为空）时，
-        // 用作者声明的变量仓库路径保证候选不空（存在性校验 + 上限）；
-        // 不每轮全量并入——115 路径逐项判断会拖慢决策速度
-        if (candidates.length === 0) {
-            for (const path of rules.zodPaths ?? []) {
-                const normalized = normalizePath(path);
-                if (!normalized) continue;
-                if (getPathValue(input.state, normalized) === undefined) continue;
-                if (!candidates.includes(normalized)) candidates.push(normalized);
-                if (candidates.length >= (options.maxCandidates ?? 80)) break;
-            }
-        }
         base.candidates = candidates;
         base.candidateSource = { from_rules, from_story };
         if (candidates.length === 0) {
-            // 规则没提、剧情也没命中任何变量 → 直接终止，不发模型请求
+            // 剧情没命中、ZOD 也无真实路径 → 直接终止，不发模型请求
             return finish('no_change');
         }
 
-        // ---- 阶段2 AI 决策：对候选清单逐项判断（防偷懒），只能选候选内 ----
+        // ---- 阶段2 AI 决策：基于（剧情 + 规则全文 + 候选清单）输出要更新的路径 ----
+        // 输出格式 = 每行一个要更新的路径（只列 Y）；规则中标注 必须/MANDATORY/每轮 的必须列出
         stages.push('decide');
-        // mandatory 同样做存在性校验（防 AI 编造/旧数据，避免任务标注不存在的路径）
-        const mandatory = (rules.mandatoryPaths ?? []).filter(
-            path => getPathValue(input.state, normalizePath(path)) !== undefined
-        );
         const decide_result = await executor.decide(
-            { story: input.story, candidates, mandatory },
+            { story: input.story, candidates, rules: rules.entries },
             undefined
         );
         base.decide = decide_result;

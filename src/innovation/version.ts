@@ -11,7 +11,7 @@
  */
 
 /** 当前版本号（与 git tag 保持一致；单位数语义：2.0.0 起） */
-export const INNOVATION_VERSION = '2.0.7';
+export const INNOVATION_VERSION = '2.0.8';
 
 /** 发布仓库（GitHub 完整路径） */
 export const INNOVATION_REPO = 'NLKASHEI/MVU-Innovation';

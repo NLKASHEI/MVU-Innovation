@@ -18,7 +18,7 @@
  * 每轮工作流直接查池（不再重复读取世界书）。
  */
 
-import { normalizePath } from '@/innovation/agent_workflow';
+import { normalizePath, splitPath } from '@/innovation/agent_workflow';
 import { WorldbookEntryLike, isPlotEntry, isUpdateRuleEntry } from '@/innovation/agent_worldbook';
 
 /** 条目类别 */
@@ -294,6 +294,114 @@ function pathHitsText(path: string, text: string): boolean {
         if (seg.length >= best.length) best = seg; // 同长取叶子段（更具体）
     }
     return best.length >= 2 && text.includes(best);
+}
+
+// ---------------------------------------------------------------------------
+// 本地规则索引（v2.0.8）：零模型替代 AI 分池——对 AI 模型要求太高，改为
+// 用 ZOD 变量仓库路径 ↔ 规则文本做段匹配（只匹配真实变量路径，不存在 1.TIME 假路径）；
+// AI 分池降级为可选增强（成功时用 AI 语义映射，失败/未触发时本地索引保底）。
+// ---------------------------------------------------------------------------
+
+/** 规则文本中的路径行 → 展开路径列表（处理 花括号 ${a|b} / 斜杠 a/b/c / 剥括号） */
+export function expandPathText(text: string): string[] {
+    // 剥括号说明（如「主角.$器灵台词（路径 /$器灵台词）」）
+    const t = String(text).replace(/[（(][^）)]*[）)]/g, '').trim();
+    const paths: string[] = [];
+    const brace = t.match(/^(.*?)\.\$\{([^}]+)\}(.*)$/);
+    if (brace) {
+        const prefix = brace[1];
+        const suffix = brace[3];
+        for (const v of brace[2].split('|')) {
+            paths.push(`${prefix}.${v}${suffix}`);
+        }
+    } else if (t.includes('/')) {
+        const parts = t.split('/');
+        const dot = parts[0].lastIndexOf('.');
+        const prefix = dot >= 0 ? parts[0].slice(0, dot + 1) : '';
+        const base = dot >= 0 ? parts[0].slice(dot + 1) : parts[0];
+        for (const p of [base, ...parts.slice(1)]) {
+            paths.push(prefix + p);
+        }
+    } else if (t) {
+        paths.push(t);
+    }
+    return paths;
+}
+
+/** 强制更新段标题关键词 */
+const FORCED_SEGMENT_RE = /强制|必须|MANDATORY|每回合|每轮|always/i;
+
+/**
+ * 本地规则索引（零模型）：
+ *   1. rulePaths/rulePathToRules：规则内容 vs ZOD 变量仓库路径的段匹配
+ *      （取路径最长段/叶子段，如 世界.当前时间 → 「当前时间」；$器灵台词 → 「器灵台词」）
+ *   2. mandatoryPaths：规则文本中【强制更新段落】（标题含 强制/必须/MANDATORY/每回合）
+ *      下缩进列出的路径（与用户「强制更新清单」语义一致，不会 34/34 全标）
+ * @param rules 规则条目
+ * @param zodPaths ZOD 变量仓库路径（真实路径，不含 <键> 模板）
+ */
+export function buildLocalRuleIndex(
+    rules: Array<{ content?: string }>,
+    zodPaths: string[]
+): { rulePaths: string[]; rulePathToRules: Map<string, string[]>; mandatoryPaths: string[] } {
+    // 候选路径：ZOD 路径中去掉 <键> 模板，保留真实路径（容器 + 叶子）
+    const candidates = (zodPaths ?? []).filter(p => !p.includes('<键>'));
+    const rulePaths: string[] = [];
+    const rulePathToRules = new Map<string, string[]>();
+    const mandatoryPaths: string[] = [];
+
+    for (const rule of rules) {
+        const content = rule.content ?? '';
+        // 1. 段匹配：ZOD 路径的最长段（叶子）出现在规则文本
+        for (const zodPath of candidates) {
+            const segments = splitPath(zodPath);
+            if (segments.length === 0) continue;
+            let best = segments[0];
+            for (const seg of segments) {
+                if (seg.length >= best.length) best = seg;
+            }
+            if (best.length < 2) continue;
+            const key = best.replace(/^\$/, '');
+            if (!content.includes(key)) continue;
+            const normalized = normalizePath(zodPath);
+            if (!rulePaths.includes(normalized)) rulePaths.push(normalized);
+            const list = rulePathToRules.get(normalized) ?? [];
+            if (!list.includes(content)) list.push(content);
+            rulePathToRules.set(normalized, list);
+        }
+        // 2. 强制段落：标题（冒号结尾且冒号前无点=段名）含强制关键词 → 其下路径行标 mandatory
+        //    （路径行冒号前含点；剥括号说明；只收 ZOD 候选内真实路径防垃圾）
+        let in_forced_segment = false;
+        for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            const bracket_stripped = trimmed.replace(/[（(][^）)]*[）)]/g, '');
+            const colon =
+                bracket_stripped.indexOf('：') >= 0
+                    ? bracket_stripped.indexOf('：')
+                    : bracket_stripped.indexOf(':');
+            const head = colon > 0 ? bracket_stripped.slice(0, colon).trim() : '';
+            const tail = colon > 0 ? bracket_stripped.slice(colon + 1).trim() : '';
+            // 标题 = 冒号结尾 且 冒号后为空 且 冒号前无点（段名）；路径行冒号后有内容
+            const is_heading = colon > 0 && !head.includes('.') && tail === '';
+            if (is_heading) {
+                in_forced_segment = FORCED_SEGMENT_RE.test(trimmed);
+                continue;
+            }
+            if (!in_forced_segment) continue;
+            const path_text = colon > 0 ? head : trimmed;
+            for (const p of expandPathText(path_text)) {
+                const normalized = normalizePath(p);
+                if (!normalized) continue;
+                if (!candidates.includes(normalized)) continue;
+                if (!mandatoryPaths.includes(normalized)) {
+                    mandatoryPaths.push(normalized);
+                }
+            }
+        }
+    }
+
+    return { rulePaths, rulePathToRules, mandatoryPaths };
 }
 
 /**

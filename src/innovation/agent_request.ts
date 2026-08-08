@@ -17,35 +17,39 @@
 /** 对话消息（多轮上下文：第一次喂完整正文出决策，第二次在同一对话里续——不重复喂正文） */
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
-/** 决策阶段输出 token 上限（候选逐项 Y/N，几十到几百字符） */
+/** 决策阶段输出 token 上限（只列要更新的路径，几十到几百字符） */
 export const DECIDE_MAX_TOKENS = 500;
 /** 更新阶段输出 token 上限（JSON Patch 数组，18 个 op 含大 insert 约 2-3k token） */
 export const UPDATE_MAX_TOKENS = 3000;
+/** 决策阶段规则全文上限（直接喂给模型，不解析——通用化，规则格式不限） */
+export const DECIDE_RULES_MAX = 6000;
 
 /**
- * 第一轮【决策】消息：
- *   system = 固定任务指令（前缀稳定，利于缓存）；user = 完整正文 + 上一轮情况 + 候选清单（动态尾部）。
- * 完整正文只在这一轮喂——第二轮更新在同一对话里续，正文在上下文里，不重复喂。
+ * 第一轮【决策】消息（v2.0.8 通用化）：
+ *   system = 固定任务指令；user = 完整正文 + 【规则全文】（直接喂，不解析路径，
+ *   模型结合剧情自行判断哪些变量相关、哪些标注必须）+ 候选清单（ZOD 变量全集）。
+ * 输出格式 = 每行一个【要更新的路径】（只列 Y，不逐项 N）——候选可能是 ZOD 全集
+ * （上百条），逐项 Y/N 会拖慢且对弱模型不友好。
  */
 export function buildDecideMessages(opts: {
     story: string;
     candidates: string[];
-    mandatory?: string[];
+    rules?: string[];
     lastRound?: string;
     last_error?: string;
 }): ChatMessage[] {
     const system_parts = [
         '<must>',
-        '你是变量更新 Agent。先执行【决策】阶段：基于最近剧情，判断候选清单中的哪些变量需要更新。',
-        '候选清单是本地启发式筛选出的「可能与剧情相关」的变量。',
-        '你必须对候选清单中的【每一个】路径逐行输出判断：',
-        '  主角.容貌: Y    （需要更新）',
-        '  主角.修为: N    （不需要更新）',
+        '你是变量更新 Agent。先执行【决策】阶段：基于最近剧情与下方【相关更新规则】，',
+        '判断哪些变量需要更新。',
+        '输出格式：每行一个【需要更新的】变量路径，不要输出判断后缀：',
+        '  世界.当前时间',
+        '  主角.修为',
         '要求：',
-        '- 逐项判断，不得省略任何一行，不得合并输出，不得只挑几个明显的变量。',
-        '- 每行必须写【实际的变量路径】+ 判断，不要照抄示例的写法。',
-        '- 候选清单全部不需要更新时，才输出一行：none。',
-        '- 不要写候选清单之外的路径（越权写入会被本地引擎拒绝）。',
+        '- 仔细阅读规则：规则中标注【必须/每轮/MANDATORY】的变量必须列出，不得遗漏。',
+        '- 结合剧情判断事件触发的变量（规则中「发生时更新」的条目）。',
+        '- 只写候选清单中的路径（越权写入会被本地引擎拒绝）。',
+        '- 全部都不需要更新时，才输出一行：none。',
         '- 不要输出解释，不要输出 <UpdateVariable> 更新块。',
         '</must>',
     ].join('\n');
@@ -53,11 +57,17 @@ export function buildDecideMessages(opts: {
     if (opts.lastRound) {
         user_parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
     }
-    user_parts.push('', '候选清单（必须逐项判断）：');
+    if (opts.rules && opts.rules.length > 0) {
+        let rules_text = opts.rules.join('\n---\n');
+        if (rules_text.length > DECIDE_RULES_MAX) {
+            rules_text = rules_text.slice(0, DECIDE_RULES_MAX) + '\n…（规则过长已截断）';
+        }
+        user_parts.push('', '相关更新规则（判断依据，标注 必须/每轮/MANDATORY 的必须更新）：', rules_text);
+    }
+    user_parts.push('', '候选清单（全部变量，从其中选择要更新的）：');
     if (opts.candidates.length > 0) {
         for (const path of opts.candidates) {
-            const mark = opts.mandatory?.includes(path) ? '  ← MANDATORY：必须更新，不得输出 N' : '';
-            user_parts.push(`- ${path}${mark}`);
+            user_parts.push(`- ${path}`);
         }
     } else {
         user_parts.push('（无）');

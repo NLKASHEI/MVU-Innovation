@@ -43,6 +43,7 @@ import {
     WorldbookEntryLike,
 } from '@/innovation/agent_worldbook';
 import {
+    buildLocalRuleIndex,
     buildWorldbookPool,
     parseAiClassification,
     poolQueryLoreByPaths,
@@ -905,26 +906,9 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
         pool_state.key === key &&
         Date.now() - pool_state.builtAt < POOL_TTL_MS;
 
-    // AI 分池需要补做的判定：未合并 && Agent 启用 &&（未尝试过 || 距上次尝试超重试间隔）
-    const should_retry_ai = (s: PoolState) =>
-        !s.pool.aiMerged &&
-        loadInnovationSettings(localStorage).agentEnabled &&
-        (!s.aiAttempted || Date.now() - s.aiLastAttemptAt > AI_RETRY_MS);
-
-    // 0. 内存池已新鲜：仅当 AI 规则分池需要补做时执行（如预热时 Agent 未开/失败后到重试窗口）
+    // 0. 内存池已新鲜 → 直接复用（v2.0.8 起不再补做 AI 分池——规则全文直喂决策）
     if (!force && fresh) {
-        if (!should_retry_ai(pool_state)) {
-            return pool_state;
-        }
-        pool_loading = true;
-        try {
-            const classified = await classifyPoolWithAi(pool_state);
-            pool_state = classified;
-            savePersistedPool(classified);
-            return classified;
-        } finally {
-            pool_loading = false;
-        }
+        return pool_state;
     }
 
     // 1. 持久化池读回（key 匹配未过期）——进入同一卡/重载脚本零重建
@@ -938,18 +922,6 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
                 persisted.zodScripts = zod.scriptNames;
             }
             pool_state = persisted;
-            // AI 规则分池需要补做 → 补做（rawEntries 已还原；失败后到重试窗口自动再试）
-            if (should_retry_ai(persisted)) {
-                pool_loading = true;
-                try {
-                    const classified = await classifyPoolWithAi(persisted);
-                    pool_state = classified;
-                    savePersistedPool(classified);
-                    return classified;
-                } finally {
-                    pool_loading = false;
-                }
-            }
             return persisted;
         }
     }
@@ -980,9 +952,9 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             (e: any) => e?.enabled !== false && String(e?.content ?? '').trim().length > 0
         );
 
-        // 本地分类建池（规则/剧情/其他 + 灯效状态 + 正则索引）
+        // 本地分类建池（规则/剧情/其他 + 灯效状态 + 索引）
         const pool = buildWorldbookPool(usable_entries);
-        // ZOD 变量仓库：扫描角色卡/全局/预设 TH 脚本，解析作者声明的变量路径（辅助候选，AI 分池失败时兜底）
+        // ZOD 变量仓库：扫描角色卡/全局/预设 TH 脚本，解析作者声明的变量路径（权威变量清单）
         const zod = await scanZodScripts();
         let state: PoolState = {
             key,
@@ -1009,12 +981,8 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             rawEntries: usable_entries,
         };
         pool_state = state;
-
-        // AI 规则分池：Agent 启用或手动加载 → 让模型逐条阅读 [mvu_update] 规则条目
-        if (loadInnovationSettings(localStorage).agentEnabled || force) {
-            state = await classifyPoolWithAi(state);
-            pool_state = state;
-        }
+        // v2.0.8 通用化：不再运行 AI 规则分池（对模型要求太高、格式敏感）——
+        // 规则全文直接喂给决策阶段，候选 = ZOD 变量全集（见 readRules/decide）
         savePersistedPool(state);
         return state;
     } finally {
@@ -1253,21 +1221,19 @@ export async function runAgentWorkflowForMessage(
                 zodPathCount: (state.zodPaths ?? []).length,
             };
             const contents = state.pool.rules.map(r => r.content);
-            // 候选路径来源：AI 规则分池路径（ZOD 仓库路径改由核心兜底——仅候选为空时启用，
-            // 避免 115 条 ZOD 路径每轮全量并入导致决策逐项判断 150+ 行拖慢速度）
+            // v2.0.8 通用化：候选范围 = ZOD 变量仓库全集（存在性校验在核心做）；
+            // 规则全文经 entries 直接喂给决策阶段（不解析规则→路径，格式不限）
             return {
                 entries: contents,
                 raw: contents.join('\n---\n'),
                 lore: [],
-                extraPaths: state.pool.rulePaths,
-                zodPaths: state.zodPaths ?? [],
-                mandatoryPaths: state.pool.mandatoryPaths,
+                extraPaths: state.zodPaths ?? [],
             };
         },
-        // 阶段2 AI 决策（第一轮，喂完整正文）：对启发式候选清单逐项 Y/N 判断。
-        // 记录本轮消息序列（round_messages）——第二轮更新在同一对话里续，正文不重复喂。
+        // 阶段2 AI 决策（第一轮，喂完整正文 + 规则全文）：基于剧情与规则输出要更新的路径
+        // （只列 Y）。记录本轮消息序列（round_messages）——第二轮更新在同一对话里续。
         decide: async (
-            input: { story: string; candidates: string[]; mandatory?: string[] },
+            input: { story: string; candidates: string[]; rules: string[] },
             last_error?: string
         ) => {
             const call_started = Date.now();
@@ -1276,7 +1242,7 @@ export async function runAgentWorkflowForMessage(
             round_messages = buildDecideMessages({
                 story: input.story,
                 candidates: input.candidates,
-                mandatory: input.mandatory,
+                rules: input.rules,
                 lastRound: last_round_summary ?? undefined,
                 last_error,
             });

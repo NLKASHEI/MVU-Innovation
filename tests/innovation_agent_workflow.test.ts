@@ -548,14 +548,13 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
         expect(result.candidateSource).toEqual({ from_rules: 1, from_story: 1 });
     });
 
-    test('ZOD 变量仓库兜底：AI 规则路径与剧情都未命中时，候选不空（v1.12.4）', async () => {
+    test('候选 = ZOD 变量全集（v2.0.8：extraPaths 传入，存在性校验过滤模板/不存在路径）', async () => {
         const seen: string[][] = [];
         const executor = buildExecutor({
-            // 规则无管辖路径（AI 分池失败场景）、剧情无命中 → 候选为空 → ZOD 兜底
             readRules: async () => ({
-                entries: ['散文规则，AI 分池未给路径'],
+                entries: ['散文规则，不解析路径'],
                 raw: '',
-                zodPaths: ['理.好感度', '世界.时间', '不存在.路径', '道侣.<键>.亲密'],
+                extraPaths: ['理.好感度', '世界.时间', '不存在.路径', '道侣.<键>.亲密'],
             }),
             decide: async input => {
                 seen.push(input.candidates);
@@ -566,7 +565,7 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
             maxRetries: 3,
             loopThreshold: 2,
         });
-        // ZOD 兜底：存在的路径进候选，不存在的（含 record 模板）被存在性校验过滤
+        // 存在的路径进候选，不存在的（含 record 模板）被存在性校验过滤
         expect(seen[0]).toEqual(['理.好感度', '世界.时间']);
         expect(result.termination).toBe('done');
     });
@@ -593,17 +592,16 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
         expect(seen[0]).toEqual(['理.好感度']);
     });
 
-    test('强制更新路径每轮必进候选并传给决策（通用机制，防偷懒）', async () => {
-        const seen: { candidates: string[]; mandatory?: string[] }[] = [];
+    test('v2.0.8 通用化：规则全文直接传入决策（不解析规则→路径）', async () => {
+        const seen: { candidates: string[]; rules: string[] }[] = [];
         const executor = buildExecutor({
             readRules: async () => ({
-                entries: ['MANDATORY 规则'],
+                entries: ['强制更新（每回合必须更新）: 绝色榜', '事件触发: 主角.修为'],
                 raw: '',
-                extraPaths: ['理.好感度'],
-                mandatoryPaths: ['理.心情', '不存在.路径'],
+                extraPaths: ['理.好感度', '理.心情'],
             }),
             decide: async input => {
-                seen.push({ candidates: input.candidates, mandatory: input.mandatory });
+                seen.push({ candidates: input.candidates, rules: input.rules });
                 return { text: '理.好感度: Y\n理.心情: Y', raw: '' };
             },
         });
@@ -611,12 +609,11 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
             maxRetries: 3,
             loopThreshold: 2,
         });
-        // 强制路径（存在性校验后）必进候选
+        // 规则全文原样传入决策（模型自己判断强制/相关）
+        expect(seen[0].rules).toEqual(['强制更新（每回合必须更新）: 绝色榜', '事件触发: 主角.修为']);
+        // 候选 = extraPaths（ZOD 全集）+ 剧情命中
+        expect(seen[0].candidates).toContain('理.好感度');
         expect(seen[0].candidates).toContain('理.心情');
-        // 不存在的强制路径被过滤
-        expect(seen[0].candidates).not.toContain('不存在.路径');
-        // mandatory 传入决策（任务里标注「必须更新」）
-        expect(seen[0].mandatory).toEqual(['理.心情']);
         expect(result.termination).toBe('done');
     });
 

@@ -6,7 +6,7 @@ import {
     normalizeGenerateText,
 } from '@/innovation/agent_request';
 
-describe('buildDecideMessages（第一轮：完整正文喂入）', () => {
+describe('buildDecideMessages（第一轮：完整正文 + 规则全文直喂）', () => {
     test('system 固定任务 + user 完整正文/候选清单', () => {
         const messages = buildDecideMessages({
             story: '剧情文本',
@@ -14,25 +14,35 @@ describe('buildDecideMessages（第一轮：完整正文喂入）', () => {
         });
         expect(messages).toHaveLength(2);
         expect(messages[0].role).toBe('system');
-        expect(messages[0].content).toContain('逐项判断，不得省略任何一行');
+        // v2.0.8 输出格式：只列 Y 路径（不逐项 Y/N——候选可能是 ZOD 全集上百条）
+        expect(messages[0].content).toContain('每行一个【需要更新的】变量路径');
+        expect(messages[0].content).toContain('标注【必须/每轮/MANDATORY】的变量必须列出');
         expect(messages[0].content).toContain('none');
-        // 示例用真实路径而非字面「路径」占位符（v1.12.10：模型曾照抄「路径: Y」导致全部被过滤）
-        expect(messages[0].content).toContain('主角.容貌: Y');
-        expect(messages[0].content).not.toContain('路径: Y    （需要更新）');
         expect(messages[1].role).toBe('user');
         expect(messages[1].content).toContain('最近剧情');
         expect(messages[1].content).toContain('剧情文本');
         expect(messages[1].content).toContain('理.好感度');
     });
 
-    test('强制更新路径标注 MANDATORY（防偷懒）', () => {
+    test('规则全文直接喂入（不解析规则→路径，通用化）', () => {
         const messages = buildDecideMessages({
             story: '',
-            candidates: ['世界.绝色榜', '主角.修为'],
-            mandatory: ['世界.绝色榜'],
+            candidates: ['世界.绝色榜'],
+            rules: ['强制更新（每回合必须更新）: 绝色榜', '事件触发: 主角.修为'],
         });
-        expect(messages[1].content).toContain('世界.绝色榜  ← MANDATORY：必须更新，不得输出 N');
-        expect(messages[1].content).not.toContain('主角.修为  ←');
+        expect(messages[1].content).toContain('相关更新规则（判断依据');
+        expect(messages[1].content).toContain('强制更新（每回合必须更新）: 绝色榜');
+        expect(messages[1].content).toContain('事件触发: 主角.修为');
+    });
+
+    test('规则全文超长截断', () => {
+        const long = '规则'.repeat(7000);
+        const messages = buildDecideMessages({
+            story: '',
+            candidates: [],
+            rules: [long],
+        });
+        expect(messages[1].content).toContain('规则过长已截断');
     });
 
     test('跨轮上下文（上一轮更新情况）与失败原因注入 user', () => {
@@ -61,7 +71,7 @@ describe('buildUpdateMessages（第二轮：同一对话里续，不重复喂正
         });
         expect(messages.length).toBe(prev.length + 3);
         // 上下文延续：第一轮的 user 剧情还在消息里，但更新轮【不新增】剧情内容
-        expect(messages[0].content).toContain('逐项判断');
+        expect(messages[0].content).toContain('需要更新的】变量路径');
         expect(messages[1].content).toContain('剧情文本');
         // assistant 携带决策输出
         expect(messages[2].role).toBe('assistant');
