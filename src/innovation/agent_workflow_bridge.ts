@@ -1185,6 +1185,16 @@ export async function runAgentWorkflowForMessage(
         // 首选结构化输出（json_schema）；provider 不支持时降级纯文本指令。
         update: async (ctx: { story: string; observation: string; rules: string[]; lore: string[] }, last_error?: string) => {
             const attempt = entry.updates.length + 1;
+            // 进入二阶段（更新）弹窗提醒，避免用户干等（决策可能耗时 30-40s）
+            try {
+                if (attempt === 1) {
+                    toastr.info('决策完成，正在更新变量…', '[革新版·Agent]');
+                } else {
+                    toastr.warning(`校验未通过，正在重试（第 ${attempt} 次）…`, '[革新版·Agent]');
+                }
+            } catch {
+                /* toastr 不可用时忽略 */
+            }
             const call_started = Date.now();
             let structured = true;
             let result: unknown;
