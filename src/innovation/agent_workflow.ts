@@ -747,48 +747,20 @@ export function isWithinScope(path: string, duePaths: string[]): boolean {
     });
 }
 
-function patchParentPath(op: PatchOp): string | null {
-    if (op.path === '' || op.path === '/') return '';
-    const segments = splitPath(pointerToPath(op.path));
-    if (segments.length === 0) return null;
-    // 数组尾部追加：/a/- → 父为 /a
-    if (op.path.endsWith('/-')) return segments.slice(0, -1).join('.') || '';
-    return segments.slice(0, -1).join('.');
-}
-
 /**
  * 校验 ops 是否允许应用（万花筒 §0.2「Agent 有推理权，没有破坏契约的权力」下放）：
- *   - 只允许写入本轮调度范围（duePaths）内的路径 → 越权拒绝
- *   - set/replace（MVU 的 _.set 语义）：父路径存在即可——路径不存在则创建字段
- *     （v1.12.11 修复：此前按「路径必须已存在」校验，误杀「先 add 空对象再 replace 填字段」的初始化流程）
- *   - remove/unset/delete/delta：路径必须已存在（删除/数值增减需要现值）
- *   - insert/add：父路径必须存在
+ *   - v1.12.12：结构校验（路径存在性/祖先/record 键 vs 数组索引）全部放行——
+ *     「能录进去就放行」由 ZOD schema（registerVariableSchema）与应用层兜底，
+ *     本地正则式结构检查是重复劳动且会误杀（如先 add 空对象再 replace 填字段的初始化流程）。
+ *   - 本地只保留【权力边界】：越权路径（不在本轮调度范围）拒绝 + 命令基本形状（缺路径）。
  * @returns 错误列表（空 = 通过）
  */
 export function validateOps(
     prepared: PreparedOps,
-    state: unknown,
+    _state: unknown,
     duePaths: string[]
 ): string[] {
     const errors: string[] = [];
-    // 顺序模拟：跟踪本批 ops 中已创建/写入的路径（add/insert/set/replace 会创建），
-    // 后续 op 的父路径/存在性检查以「state ∪ created」为准——
-    // 修复「先 add 空对象再 replace 填子字段」的初始化流程被误杀（v1.12.11）
-    const created = new Set<string>();
-    const existsPath = (dot: string): boolean => {
-        if (!dot) return true;
-        if (hasPath(state, dot)) return true;
-        return created.has(dot);
-    };
-    // MVU replace/set 应用 = _.set（全链创建）：祖先链上任一级存在即可写入
-    // （防「完全瞎写顶层不存在路径」，允许在已存在容器内创建任意深度字段）
-    const hasAncestor = (dot: string): boolean => {
-        const segments = splitPath(dot);
-        for (let i = segments.length - 1; i > 0; i--) {
-            if (existsPath(segments.slice(0, i).join('.'))) return true;
-        }
-        return false;
-    };
 
     for (const cmd of prepared.commands) {
         if (!cmd.path) {
@@ -797,26 +769,6 @@ export function validateOps(
         }
         if (!isWithinScope(cmd.path, duePaths)) {
             errors.push(`越权路径 '${cmd.path}'（不在本轮调度范围）`);
-            continue;
-        }
-        if (cmd.type === 'remove' || cmd.type === 'unset' || cmd.type === 'delete') {
-            if (!existsPath(cmd.path)) {
-                errors.push(`路径 '${cmd.path}' 不存在于 stat_data`);
-            }
-        } else if (cmd.type === 'set') {
-            // MVU _.set 语义：祖先链存在即可（_.set 全链创建）
-            if (!hasAncestor(cmd.path)) {
-                errors.push(`路径 '${cmd.path}' 的祖先路径不存在于 stat_data`);
-            }
-            created.add(cmd.path);
-        } else if (cmd.type === 'insert' || cmd.type === 'assign' || cmd.type === 'add') {
-            if (!existsPath(cmd.path)) {
-                const parent = splitPath(cmd.path).slice(0, -1).join('.');
-                if (!existsPath(parent)) {
-                    errors.push(`父路径 '${parent}' 不存在，无法插入 '${cmd.path}'`);
-                }
-            }
-            created.add(cmd.path);
         }
     }
 
@@ -825,28 +777,6 @@ export function validateOps(
             const dot = pointerToPath(op.path);
             if (!isWithinScope(dot, duePaths)) {
                 errors.push(`越权路径 '${dot}'（不在本轮调度范围）`);
-                continue;
-            }
-            if (op.op === 'replace') {
-                // MVU replace = _.set 语义：祖先链存在即可（_.set 全链创建）
-                if (!hasAncestor(dot)) {
-                    errors.push(`路径 '${dot}' 的祖先路径不存在于 stat_data`);
-                }
-                created.add(dot);
-            } else if (op.op === 'remove' || op.op === 'delta') {
-                if (!existsPath(dot)) {
-                    errors.push(`路径 '${dot}' 不存在于 stat_data`);
-                }
-            } else if (op.op === 'insert' || op.op === 'add') {
-                const parent = patchParentPath(op);
-                if (parent !== null && !existsPath(parent)) {
-                    errors.push(`父路径 '${parent}' 不存在，无法插入 '${dot}'`);
-                }
-                created.add(dot);
-            } else if (op.op === 'move') {
-                if (op.from && !existsPath(pointerToPath(op.from))) {
-                    errors.push(`move 来源 '${op.from}' 不存在`);
-                }
             }
         }
     }
