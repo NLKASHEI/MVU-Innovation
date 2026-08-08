@@ -405,8 +405,13 @@ interface PersistedPool {
     zodScripts?: string[];
 }
 
-const POOL_STORAGE_KEY = 'nlkaleido:worldbook_pool_v2';
-/** 持久化池结构版本（v2：AI 细粒度强制标记；旧版粗粒度 mandatoryPaths 的池直接重建） */
+/**
+ * 池持久化（v2.0.4 起 key 固定不带版本号——升级脚本/版本永远能读回同一份池，
+ * 不再「更新版本 → 上一个版本完全丢失」；version 字段仅用于未来结构迁移提示，
+ * 读取时不因版本不匹配丢弃：旧版本池缺的字段宽容默认，缺失状态（如 AI 分池）自动补做）。
+ */
+const POOL_STORAGE_KEY = 'nlkaleido:worldbook_pool';
+/** 持久化池结构版本（仅记录，不用于丢弃） */
 const POOL_STORAGE_VERSION = 2;
 /** 持久化池最多保留的卡数（LRU，按 builtAt 淘汰最旧） */
 const POOL_STORAGE_MAX = 5;
@@ -580,11 +585,11 @@ function poolFromPersisted(p: PersistedPool): PoolState {
     };
 }
 
-/** 尝试从 localStorage 读回指定 key 的池（未过期且结构版本匹配） */
+/** 尝试从 localStorage 读回指定 key 的池（未过期即可；版本不匹配宽容迁移，缺失字段默认值） */
 function loadPersistedPool(key: string): PoolState | null {
     const pools = loadPersistedPools();
     const persisted = pools[key];
-    if (!persisted || persisted.version !== POOL_STORAGE_VERSION) return null;
+    if (!persisted) return null;
     if (Date.now() - persisted.builtAt >= POOL_TTL_MS) return null;
     try {
         return poolFromPersisted(persisted);
@@ -1099,17 +1104,19 @@ async function applyPreparedOps(prepared: PreparedOps): Promise<{ applied: boole
 /**
  * 对一条 MESSAGE_RECEIVED 执行革新版单次 Agent 回合工作流。
  * @param message_id 收到的消息 id
+ * @param initialToast 起始提示文案（手动触发（重试/重新处理）时区分，避免显示「更新中」误导）
  * @returns 工作流结果；Agent 未启用或状态缺失时返回 null
  */
 export async function runAgentWorkflowForMessage(
-    message_id: number
+    message_id: number,
+    initialToast?: string
 ): Promise<AgentWorkflowResult | null> {
     const settings = loadInnovationSettings(localStorage);
     if (!settings.agentEnabled) return null;
 
-    // 更新中提示（toastr 为 ST 全局；革新版自己的提示，不复用原版通知开关）
+    // 起始提示（toastr 为 ST 全局；革新版自己的提示，不复用原版通知开关）
     try {
-        toastr.info('革新版 Agent 变量更新中…', '[革新版·Agent]');
+        toastr.info(initialToast ?? '革新版 Agent 变量更新中…', '[革新版·Agent]');
     } catch {
         /* toastr 不可用时忽略 */
     }
@@ -1421,10 +1428,14 @@ export async function runAgentWorkflowForMessage(
  * 手动重试最近一次更新（面板「重试最近一次更新」按钮）——
  * 走革新版工作流（决策→拉取→观察→更新→校验），不复用原版额外模型解析。
  */
-export async function retryLastAgentWorkflow(): Promise<AgentWorkflowResult | null> {
+/**
+ * 手动重试/重新处理最近一次更新（面板按钮）——走革新版工作流。
+ * @param reprocess 重新处理模式（起始提示「重新处理中…」而非「更新中」）
+ */
+export async function retryLastAgentWorkflow(reprocess = false): Promise<AgentWorkflowResult | null> {
     const message_id = getLastMessageId();
     if (message_id === null || message_id === undefined) return null;
-    return runAgentWorkflowForMessage(message_id);
+    return runAgentWorkflowForMessage(message_id, reprocess ? '革新版 Agent 重新处理中…' : undefined);
 }
 
 /**
