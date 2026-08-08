@@ -35,7 +35,7 @@
                     <span>在 console 输出缓存命中率</span>
                 </Checkbox>
                 <div class="nlkaleido-cache-metrics">
-                    <span>请求 <b>{{ cacheMetrics.totalRequests }}</b></span>
+                    <span>原版额外模型解析 请求 <b>{{ cacheMetrics.totalRequests }}</b></span>
                     <span>命中 <b>{{ cacheMetrics.hitTokens }}</b></span>
                     <span>未命中 <b>{{ cacheMetrics.missTokens }}</b></span>
                     <span>
@@ -43,6 +43,19 @@
                         <b>{{ cacheRateText }}</b>
                     </span>
                 </div>
+                <div class="nlkaleido-cache-metrics">
+                    <span>革新版 Agent 调用 请求 <b>{{ innovationCache.totalRequests }}</b></span>
+                    <span>命中 <b>{{ innovationCache.hitTokens }}</b></span>
+                    <span>未命中 <b>{{ innovationCache.missTokens }}</b></span>
+                    <span>
+                        命中率
+                        <b>{{ innovationCacheRateText }}</b>
+                    </span>
+                </div>
+                <p class="nlkaleido-tip">
+                    革新版每楼层两次调用（决策+更新）：第二次请求前缀 = 第一次全部消息 → 楼内命中率高；
+                    跨楼层仅命中固定任务模板。无 usage 返回的 provider（OpenAI）不计费不显示。
+                </p>
             </Detail>
 
             <Detail title="最近 Agent 工作流">
@@ -305,6 +318,7 @@ import RangeNumber from '@/panel/component/RangeNumber.vue';
 import Section from '@/panel/component/Section.vue';
 import { getCacheMetricsState } from '@/innovation/cache_metrics_bridge';
 import {
+    getInnovationCacheMetrics,
     getLastWorkflowResult,
     getWorkflowDebugLogs,
     getWorldbookPoolState,
@@ -335,6 +349,7 @@ watch(
 );
 
 const cacheMetrics = ref(getCacheMetricsState());
+const innovationCache = ref(getInnovationCacheMetrics());
 const lastWorkflow = ref(getLastWorkflowResult());
 const debugLogs = ref(getWorkflowDebugLogs());
 const expanded = ref<Record<number, boolean>>({});
@@ -344,6 +359,12 @@ const cacheRateText = computed(() => {
     const total = cacheMetrics.value.hitTokens + cacheMetrics.value.missTokens;
     if (total <= 0) return 'N/A';
     return `${((cacheMetrics.value.hitTokens / total) * 100).toFixed(1)}%`;
+});
+
+const innovationCacheRateText = computed(() => {
+    const total = innovationCache.value.hitTokens + innovationCache.value.missTokens;
+    if (total <= 0) return 'N/A';
+    return `${((innovationCache.value.hitTokens / total) * 100).toFixed(1)}%`;
 });
 
 async function onLoadPool() {
@@ -407,6 +428,7 @@ async function onCopyUpdateUrl() {
 // 周期性刷新缓存度量、工作流状态、调试日志与缓存池状态
 const timer = setInterval(() => {
     cacheMetrics.value = getCacheMetricsState();
+    innovationCache.value = getInnovationCacheMetrics();
     lastWorkflow.value = getLastWorkflowResult();
     debugLogs.value = getWorkflowDebugLogs();
     poolState.value = getWorldbookPoolState();

@@ -22,13 +22,9 @@
  * 纯逻辑部分（请求构造/决策解析/投影/校验/工作流编排/规则分拣）均有独立单测。
  */
 
-import {
-    parseDecidePaths,
-    runAgentWorkflow,
-    AgentWorkflowResult,
-    PreparedOps,
-} from '@/innovation/agent_workflow';
+import { parseDecidePaths, runAgentWorkflow, AgentWorkflowResult, PreparedOps } from '@/innovation/agent_workflow';
 import { isZodScript, parseZodSchemaPaths } from '@/innovation/agent_zod';
+import { createCacheMetricsState, recordCacheUsage, CacheMetricsState } from '@/innovation/cache_metrics';
 import {
     buildDecideMessages,
     buildMessagesRawConfig,
@@ -69,6 +65,29 @@ let last_workflow_result: AgentWorkflowResult | null = null;
 
 /** 跨轮上下文：上一轮更新摘要（喂回下一轮 decide/update 任务，解决「不看前一层输入」） */
 let last_round_summary: string | null = null;
+
+/** 革新版自身模型调用的缓存命中统计（decide/update 的 usage，与面板原版统计分离） */
+let innovation_cache: CacheMetricsState = createCacheMetricsState();
+
+/** 记录一次革新版模型调用的 usage（provider 返回 prompt_cache_hit/miss_tokens） */
+function recordInnovationUsage(result: unknown): void {
+    try {
+        const usage = (result as { usage?: unknown } | null)?.usage;
+        if (usage) {
+            innovation_cache = recordCacheUsage(innovation_cache, usage);
+        } else {
+            // 无 usage（如纯文本返回）也计入请求总数
+            innovation_cache = recordCacheUsage(innovation_cache, undefined);
+        }
+    } catch {
+        /* 度量失败不影响工作流 */
+    }
+}
+
+/** 革新版模型调用缓存命中状态（供面板显示） */
+export function getInnovationCacheMetrics(): CacheMetricsState {
+    return innovation_cache;
+}
 
 export function getLastWorkflowResult(): AgentWorkflowResult | null {
     return last_workflow_result;
@@ -1128,7 +1147,9 @@ export async function runAgentWorkflowForMessage(
                 custom_api,
                 max_tokens: DECIDE_MAX_TOKENS,
             });
-            const text = normalizeGenerateText(await generateRaw(config));
+            const raw_result = await generateRaw(config);
+            recordInnovationUsage(raw_result);
+            const text = normalizeGenerateText(raw_result);
             decide_output = text;
             entry.decide = {
                 text_preview: preview(text, PREVIEW_TEXT),
@@ -1205,6 +1226,7 @@ export async function runAgentWorkflowForMessage(
                 });
                 result = await generateRaw(fallback_config);
             }
+            recordInnovationUsage(result);
             const text = normalizeGenerateText(result);
             const structured_block = wrapStructuredPatch(text);
             const block = structured_block ?? extractUpdateBlock(text);
