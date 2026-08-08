@@ -38,6 +38,7 @@ import {
 import {
     pickUpdateWorldbookNames,
     splitRulePlotEntries,
+    WorldbookEntryLike,
 } from '@/innovation/agent_worldbook';
 import {
     buildWorldbookPool,
@@ -45,6 +46,10 @@ import {
     poolQueryLoreByPaths,
     poolQueryRulesByPaths,
     AiByIndex,
+    PooledEntry,
+    PoolIndexStats,
+    PoolMarker,
+    PoolStrategy,
     WorldbookPool,
 } from '@/innovation/agent_worldbook_pool';
 import { updateVariables } from '@/function/update_variables';
@@ -280,9 +285,40 @@ interface PoolState {
     rawEntries: any[];
 }
 
+/** 持久化池（localStorage；不含 rawEntries——可从 entries 还原） */
+interface PersistedPool {
+    version: number;
+    key: string;
+    builtAt: number;
+    entries: {
+        name: string;
+        content: string;
+        marker: PoolMarker;
+        strategy: PoolStrategy;
+        keys: string[];
+    }[];
+    rulePaths: string[];
+    rulePathToRules: [string, string[]][];
+    strategyCount: { constant: number; selective: number; vectorized: number };
+    aiMerged: boolean;
+    indexStats: PoolIndexStats;
+    scan: WorldbookScanDetail;
+    aiDurationMs: number;
+    aiAttempted: boolean;
+    aiBatchesOk: number;
+    aiBatchesTotal: number;
+}
+
+const POOL_STORAGE_KEY = 'nlkaleido:worldbook_pool_v1';
+/** 持久化池最多保留的卡数（LRU，按 builtAt 淘汰最旧） */
+const POOL_STORAGE_MAX = 5;
+/** 池 TTL：24h（进入同一卡/重载脚本直接读回持久化池，不重建） */
+const POOL_TTL_MS = 24 * 60 * 60 * 1000;
+
 let pool_state: PoolState | null = null;
 let pool_loading = false;
-const POOL_TTL_MS = 10 * 60_000;
+/** 世界书 API 错误（池子没 API 时报错提示，不静默降级） */
+let pool_error: string | null = null;
 
 /** 面板：缓存池是否正在加载 */
 export function isWorldbookPoolLoading(): boolean {
@@ -293,8 +329,25 @@ export function isWorldbookPoolLoading(): boolean {
 export function getWorldbookPoolState(): (PoolDebugDetail & {
     builtAt: number;
     loaded_names: string[];
+    error: string | null;
 }) | null {
-    if (!pool_state) return null;
+    if (!pool_state) {
+        return pool_error
+            ? {
+                  builtAt: 0,
+                  loaded_names: [],
+                  entries: 0,
+                  rules: 0,
+                  strategy: { constant: 0, selective: 0, vectorized: 0 },
+                  aiMerged: false,
+                  aiDurationMs: 0,
+                  aiBatchesOk: 0,
+                  aiBatchesTotal: 0,
+                  indexStats: { rulePaths: 0, rulePathToRules: 0 },
+                  error: pool_error,
+              }
+            : null;
+    }
     return {
         builtAt: pool_state.builtAt,
         loaded_names: pool_state.scan.loaded_names,
@@ -306,6 +359,7 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
         aiBatchesOk: pool_state.aiBatchesOk,
         aiBatchesTotal: pool_state.aiBatchesTotal,
         indexStats: { ...pool_state.pool.indexStats },
+        error: pool_error,
     };
 }
 
@@ -317,6 +371,113 @@ function poolKey(active_names: string[], fallback_names: string[]): string {
         /* ignore */
     }
     return `${chat_id}|${active_names.join(',')}|${fallback_names.join(',')}`;
+}
+
+// ---------------------------------------------------------------------------
+// 池持久化（localStorage：进入同一卡/重载脚本直接读回，不重建不重复 AI 分池）
+// ---------------------------------------------------------------------------
+
+function loadPersistedPools(): Record<string, PersistedPool> {
+    try {
+        const raw = localStorage.getItem(POOL_STORAGE_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw) as { pools?: Record<string, PersistedPool> };
+        return parsed?.pools && typeof parsed.pools === 'object' ? parsed.pools : {};
+    } catch {
+        return {};
+    }
+}
+
+function savePersistedPool(state: PoolState): void {
+    try {
+        const pools = loadPersistedPools();
+        const persisted: PersistedPool = {
+            version: 1,
+            key: state.key,
+            builtAt: state.builtAt,
+            entries: state.pool.entries.map(e => ({
+                name: e.name,
+                content: e.content,
+                marker: e.marker,
+                strategy: e.strategy,
+                keys: e.keys,
+            })),
+            rulePaths: [...state.pool.rulePaths],
+            rulePathToRules: [...state.pool.rulePathToRules.entries()],
+            strategyCount: { ...state.pool.strategyCount },
+            aiMerged: state.pool.aiMerged,
+            indexStats: { ...state.pool.indexStats },
+            scan: state.scan,
+            aiDurationMs: state.aiDurationMs,
+            aiAttempted: state.aiAttempted,
+            aiBatchesOk: state.aiBatchesOk,
+            aiBatchesTotal: state.aiBatchesTotal,
+        };
+        pools[state.key] = persisted;
+        // LRU 淘汰：保留 builtAt 最新的 POOL_STORAGE_MAX 个
+        const keys = Object.keys(pools);
+        if (keys.length > POOL_STORAGE_MAX) {
+            keys
+                .sort((a, b) => (pools[a]?.builtAt ?? 0) - (pools[b]?.builtAt ?? 0))
+                .slice(0, keys.length - POOL_STORAGE_MAX)
+                .forEach(k => delete pools[k]);
+        }
+        localStorage.setItem(POOL_STORAGE_KEY, JSON.stringify({ pools }));
+    } catch (e) {
+        console.warn('[革新版·Agent] 缓存池持久化失败', e);
+    }
+}
+
+/** 从持久化池恢复内存态（rawEntries 从 entries 还原，供 AI 分池补做） */
+function poolFromPersisted(p: PersistedPool): PoolState {
+    const entries: PooledEntry[] = p.entries.map(e => ({
+        name: e.name,
+        content: e.content,
+        marker: e.marker,
+        strategy: e.strategy,
+        keys: e.keys,
+    }));
+    const pool: WorldbookPool = {
+        entries,
+        rules: entries.filter(e => e.marker === 'rule'),
+        rulePaths: [...p.rulePaths],
+        rulePathToRules: new Map(p.rulePathToRules),
+        strategyCount: { ...p.strategyCount },
+        aiMerged: p.aiMerged,
+        indexStats: { ...p.indexStats },
+    };
+    const rawEntries: WorldbookEntryLike[] = entries.map(e => ({
+        name: e.name,
+        content: e.content,
+        enabled: true,
+        strategy:
+            e.strategy === 'selective' || e.strategy === 'vectorized'
+                ? { type: e.strategy, keys: e.keys.map(k => k) }
+                : { type: 'constant' },
+    }));
+    return {
+        key: p.key,
+        builtAt: p.builtAt,
+        pool,
+        scan: { ...p.scan, active_names: [...p.scan.active_names], loaded_names: [...p.scan.loaded_names] },
+        aiDurationMs: p.aiDurationMs,
+        aiAttempted: p.aiAttempted,
+        aiBatchesOk: p.aiBatchesOk,
+        aiBatchesTotal: p.aiBatchesTotal,
+        rawEntries,
+    };
+}
+
+/** 尝试从 localStorage 读回指定 key 的池（未过期） */
+function loadPersistedPool(key: string): PoolState | null {
+    const pools = loadPersistedPools();
+    const persisted = pools[key];
+    if (!persisted || Date.now() - persisted.builtAt >= POOL_TTL_MS) return null;
+    try {
+        return poolFromPersisted(persisted);
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -423,34 +584,75 @@ async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
 }
 
 /**
- * 初始化/获取世界书缓存池：
- *   1. 读世界书（绑定集 → 名字启发式唯一回退，不做全量回退）
- *   2. 过滤可用条目（enabled 且 content 非空——AI 分池与建池共用同一数组，保证下标对齐）
- *   3. 分好类别进池（规则/剧情/其他 + 灯效状态 + 正则索引）
- *   4. AI 规则分池：Agent 启用或手动加载时，让模型逐条阅读 [mvu_update] 规则条目
- *      （通常 1-3 批、几秒），补全散文规则的管辖路径；失败静默降级纯本地索引
- * 之后每轮工作流直接查池，不再重复读取世界书（池 TTL 10 分钟）。
- * @param force 强制重建（手动加载按钮）；AI 规则分池在 Agent 启用或手动加载时执行
+ * 初始化/获取世界书缓存池（四级查找，尽量避免重建）：
+ *   0. 内存池（key 匹配且未过期）
+ *   1. 持久化池（localStorage，key 匹配且未过期——进入同一卡/重载脚本直接读回，
+ *      不重建、不重复 AI 分池；多卡各存一份，LRU 上限 5）
+ *   2. 读世界书重建（绑定集 → 名字启发式唯一回退）+ AI 规则分池，构建后持久化
+ * 世界书 API 不可用（getWorldbookNames 抛错）时：能读回持久化池就用，否则
+ * 明确 toastr 报错并记录 pool_error（不静默降级）。
+ * @param force 强制重建（手动加载按钮，跳过持久化读回）；AI 规则分池在 Agent 启用或手动加载时执行
  */
 async function ensureWorldbookPool(force = false): Promise<PoolState> {
-    const all_names: string[] = (() => {
-        try {
-            return getWorldbookNames();
-        } catch {
-            return [];
-        }
-    })();
+    let all_names: string[] = [];
+    let api_error: string | null = null;
+    try {
+        all_names = getWorldbookNames();
+    } catch (e) {
+        api_error = e instanceof Error ? e.message : String(e);
+    }
+
     const active_names = collectActiveWorldbookNames(all_names);
     const fallback_names = pickUpdateWorldbookNames(
         all_names.filter(name => !active_names.includes(name))
     );
     const key = poolKey(active_names, fallback_names);
+
+    // API 报错（池子没 API）
+    if (api_error) {
+        if (pool_error !== api_error) {
+            pool_error = `世界书 API 不可用：${api_error}（请检查 TavernHelper 版本）`;
+            try {
+                toastr.error(pool_error, '[革新版·Agent]缓存池');
+            } catch {
+                /* toastr 不可用时忽略 */
+            }
+        }
+        // 尽力读回持久化池（同 key 未过期）→ 仍可用
+        const persisted = loadPersistedPool(key);
+        if (persisted) {
+            pool_state = persisted;
+            return persisted;
+        }
+        return {
+            key,
+            builtAt: Date.now(),
+            pool: buildWorldbookPool([]),
+            scan: {
+                total_names: 0,
+                active_names,
+                loaded_names: [],
+                loaded_entries: 0,
+                rules_matched: 0,
+                plot_matched: 0,
+                fell_back: false,
+                duration_ms: 0,
+            },
+            aiDurationMs: 0,
+            aiAttempted: true,
+            aiBatchesOk: 0,
+            aiBatchesTotal: 0,
+            rawEntries: [],
+        };
+    }
+    pool_error = null;
+
     const fresh =
         pool_state !== null &&
         pool_state.key === key &&
         Date.now() - pool_state.builtAt < POOL_TTL_MS;
 
-    // 池已新鲜：仅当 Agent 已启用且 AI 规则分池未做过时补做（如预热时 Agent 未开）
+    // 0. 内存池已新鲜：仅当 Agent 已启用且 AI 规则分池未做过时补做（如预热时 Agent 未开）
     if (!force && fresh) {
         if (
             pool_state.pool.aiMerged ||
@@ -463,9 +665,35 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
         try {
             const classified = await classifyPoolWithAi(pool_state);
             pool_state = classified;
+            savePersistedPool(classified);
             return classified;
         } finally {
             pool_loading = false;
+        }
+    }
+
+    // 1. 持久化池读回（key 匹配未过期）——进入同一卡/重载脚本零重建
+    if (!force) {
+        const persisted = loadPersistedPool(key);
+        if (persisted) {
+            pool_state = persisted;
+            // Agent 已启用且持久化池未深化 → 补做 AI 规则分池（rawEntries 已还原）
+            if (
+                !persisted.pool.aiMerged &&
+                !persisted.aiAttempted &&
+                loadInnovationSettings(localStorage).agentEnabled
+            ) {
+                pool_loading = true;
+                try {
+                    const classified = await classifyPoolWithAi(persisted);
+                    pool_state = classified;
+                    savePersistedPool(classified);
+                    return classified;
+                } finally {
+                    pool_loading = false;
+                }
+            }
+            return persisted;
         }
     }
 
@@ -524,6 +752,7 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             state = await classifyPoolWithAi(state);
             pool_state = state;
         }
+        savePersistedPool(state);
         return state;
     } finally {
         pool_loading = false;

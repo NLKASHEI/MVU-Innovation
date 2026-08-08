@@ -65,7 +65,10 @@
             </Detail>
 
             <Detail title="世界书缓存池（初始化预热）">
-                <p v-if="poolState" class="nlkaleido-tip">
+                <p v-if="poolState && poolState.error" class="nlkaleido-warn">
+                    缓存池错误：{{ poolState.error }}
+                </p>
+                <p v-else-if="poolState" class="nlkaleido-tip">
                     建池 {{ formatTime(poolState.builtAt) }} ·
                     加载「{{ poolState.loaded_names.join('、') }}」·
                     入池 <b>{{ poolState.entries }}</b> 条目
