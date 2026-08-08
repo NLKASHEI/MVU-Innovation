@@ -97,14 +97,17 @@
                                 ? `「${poolState.zodScripts.join('、')}」${poolState.zodPathCount} 路径`
                                 : '未发现'
                         }} ·
-                        AI 规则分池
+                    AI 规则分池
                     {{
                         poolState.aiMerged
                             ? `已合并（${poolState.aiBatchesOk}/${poolState.aiBatchesTotal} 批，${poolState.aiDurationMs}ms）`
-                            : poolState.aiBatchesTotal > 0 && poolState.aiDurationMs > 0
-                              ? `尝试过（${poolState.aiBatchesOk}/${poolState.aiBatchesTotal} 批）`
-                              : '未触发'
+                            : poolState.aiAttempted
+                              ? `尝试过（失败）`
+                              : '未触发（开启 Agent 后自动补做）'
                     }}
+                    <span v-if="poolState.aiError" class="nlkaleido-warn">
+                        ｜{{ poolState.aiError }}
+                    </span>
                 </p>
                 <p v-else class="nlkaleido-tip">
                     缓存池尚未加载（进入卡或手动加载后自动预热）。
@@ -378,7 +381,15 @@ const innovationCacheRateText = computed(() => {
 async function onLoadPool() {
     poolLoading.value = true;
     try {
-        await loadWorldbookPoolNow(true);
+        const state = await loadWorldbookPoolNow(true);
+        poolState.value = getWorldbookPoolState();
+        // 手动加载后 AI 分池失败 → 明确提示原因（规则路径会为 0，候选只剩剧情命中）
+        if (state && state.pool && !state.pool.aiMerged && state.aiError) {
+            toastr.error(
+                `AI 规则分池失败：${state.aiError}（规则路径将为 0，候选只剩剧情命中）`,
+                '[革新版·Agent]手动加载缓存池'
+            );
+        }
     } finally {
         poolLoading.value = false;
         poolState.value = getWorldbookPoolState();

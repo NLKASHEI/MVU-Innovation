@@ -199,6 +199,8 @@ export interface PoolDebugDetail {
     /** AI 分池成功批数/总批数 */
     aiBatchesOk: number;
     aiBatchesTotal: number;
+    /** AI 分池失败原因（面板显示；null=成功或未触发） */
+    aiError: string | null;
     /** 索引统计（rulePaths 规则路径 / rulePathToRules 精确映射） */
     indexStats: { rulePaths: number; rulePathToRules: number };
     /** ZOD 变量仓库：命中的脚本名与解析路径数 */
@@ -444,8 +446,10 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
                   strategy: { constant: 0, selective: 0, vectorized: 0 },
                   aiMerged: false,
                   aiAttempted: false,
-                  aiDurationMs: 0,                  aiBatchesOk: 0,
+                  aiDurationMs: 0,
+                  aiBatchesOk: 0,
                   aiBatchesTotal: 0,
+                  aiError: null,
                   indexStats: { rulePaths: 0, rulePathToRules: 0 },
                   zodScripts: [],
                   zodPathCount: 0,
@@ -464,6 +468,7 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
         aiDurationMs: pool_state.aiDurationMs,
         aiBatchesOk: pool_state.aiBatchesOk,
         aiBatchesTotal: pool_state.aiBatchesTotal,
+        aiError: pool_state.aiError ?? null,
         indexStats: { ...pool_state.pool.indexStats },
         zodScripts: pool_state.zodScripts ?? [],
         zodPathCount: (pool_state.zodPaths ?? []).length,
@@ -578,6 +583,7 @@ function poolFromPersisted(p: PersistedPool): PoolState {
         aiLastAttemptAt: p.aiLastAttemptAt ?? 0,
         aiBatchesOk: p.aiBatchesOk,
         aiBatchesTotal: p.aiBatchesTotal,
+        aiError: null,
         // ZOD 变量仓库：持久化缺失时留空，由 ensureWorldbookPool 读回后异步补扫（脚本变化也能跟上）
         zodPaths: p.zodPaths ?? [],
         zodScripts: p.zodScripts ?? [],
@@ -652,6 +658,7 @@ async function aiClassifyEntries(
     if (current.length > 0) batches.push(current);
 
     const started = Date.now();
+    let first_error: string | null = null;
     const byIndex: AiByIndex = new Map();
     const mandatoryByIndex: AiMandatoryByIndex = new Map();
     let batchesOk = 0;
@@ -718,6 +725,7 @@ async function aiClassifyEntries(
                 text = normalizeGenerateText(await generateRaw(config));
                 applied = apply_batch(text);
             } catch (e) {
+                first_error ??= `批次 ${b + 1} json_schema 失败：${e instanceof Error ? e.message : String(e)}`;
                 console.warn('[革新版·Agent] AI 分池 json_schema 失败，降级文本', e);
             }
             // 2. 解析失败（模型输出不合 schema）→ 文本模式重试
@@ -727,12 +735,14 @@ async function aiClassifyEntries(
                     text = normalizeGenerateText(await generateRaw(fallback_config));
                     applied = apply_batch(text);
                 } catch (e) {
+                    first_error ??= `批次 ${b + 1} 文本模式失败：${e instanceof Error ? e.message : String(e)}`;
                     console.warn('[革新版·Agent] AI 分池文本模式也失败', e);
                 }
             }
             if (applied) {
                 batchesOk++;
             } else {
+                first_error ??= `批次 ${b + 1} 输出无法解析（json_schema 与文本均失败）`;
                 console.warn(
                     `[革新版·Agent] AI 分池批次 ${b + 1}/${batches.length} 输出无法解析（json_schema 与文本均失败），已跳过`
                 );
@@ -742,23 +752,38 @@ async function aiClassifyEntries(
         }
     }
 
-    if (batchesOk === 0) return null;
+    if (batchesOk === 0) {
+        return {
+            byIndex,
+            mandatoryByIndex,
+            batchesOk,
+            batchesTotal,
+            durationMs: Date.now() - started,
+            error: first_error ?? undefined,
+        };
+    }
     return { byIndex, mandatoryByIndex, batchesOk, batchesTotal, durationMs: Date.now() - started };
 }
 
 /** AI 规则分池：让模型分批完整阅读规则条目，重建池（合并规则路径精确层 + 细粒度强制标记） */
 async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
     if (state.pool.entries.length === 0) {
-        return { ...state, aiAttempted: true, aiLastAttemptAt: Date.now() };
+        return {
+            ...state,
+            aiAttempted: true,
+            aiLastAttemptAt: Date.now(),
+            aiError: '无可用条目可分池',
+        };
     }
     const result = await aiClassifyEntries(state.rawEntries);
-    if (!result) {
+    if (result.batchesOk === 0) {
         return {
             ...state,
             aiAttempted: true,
             aiLastAttemptAt: Date.now(),
             aiBatchesOk: 0,
-            aiBatchesTotal: Math.ceil(state.rawEntries.length / AI_CLASSIFY_BATCH),
+            aiBatchesTotal: result.batchesTotal,
+            aiError: result.error ?? 'AI 分池输出无法解析',
         };
     }
     const pool = buildWorldbookPool(state.rawEntries, {
@@ -773,6 +798,7 @@ async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
         aiLastAttemptAt: Date.now(),
         aiBatchesOk: result.batchesOk,
         aiBatchesTotal: result.batchesTotal,
+        aiError: null,
     };
 }
 
@@ -866,6 +892,7 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             aiLastAttemptAt: 0,
             aiBatchesOk: 0,
             aiBatchesTotal: 0,
+            aiError: null,
             zodPaths: [],
             zodScripts: [],
             rawEntries: [],
@@ -976,6 +1003,7 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             aiLastAttemptAt: 0,
             aiBatchesOk: 0,
             aiBatchesTotal: Math.ceil(usable_entries.length / AI_CLASSIFY_BATCH),
+            aiError: null,
             zodPaths: zod.paths,
             zodScripts: zod.scriptNames,
             rawEntries: usable_entries,
