@@ -44,8 +44,10 @@ export interface RuleSet {
     raw: string;
     /** 世界书背景条目（[mvu_plot] 等，已按决策路径挑选） */
     lore?: string[];
-    /** AI 深化分类补全的规则路径（世界书缓存池产出，供候选搜索并入） */
+    /** AI 规则分池给出的管辖路径（worldbook_pool 产物，供候选搜索；无正则提取） */
     extraPaths?: string[];
+    /** 强制更新路径（规则标 MANDATORY/必须/每轮 → 每轮必进候选并标注必须更新） */
+    mandatoryPaths?: string[];
 }
 
 /** 阶段3 观察层投影结果（§3.6 下放） */
@@ -137,7 +139,7 @@ export interface AgentWorkflowExecutor {
     readRules(): Promise<RuleSet>;
     /** 阶段1：AI 在启发式候选清单内逐项决策——输出「哪些候选要更新」 */
     decide(
-        input: { story: string; candidates: string[] },
+        input: { story: string; candidates: string[]; mandatory?: string[] },
         lastError?: string
     ): Promise<DecideResult>;
     /**
@@ -941,6 +943,14 @@ export async function runAgentWorkflow(
             rule_paths,
             { maxCandidates: options.maxCandidates }
         );
+        // 强制更新路径（通用机制）：规则标 MANDATORY/必须/每轮 → 每轮必进候选
+        // （存在性校验，防 AI 编造/旧数据；决策任务会标注「必须更新」防偷懒）
+        for (const path of rules.mandatoryPaths ?? []) {
+            const normalized = normalizePath(path);
+            if (!normalized) continue;
+            if (getPathValue(input.state, normalized) === undefined) continue;
+            if (!candidates.includes(normalized)) candidates.push(normalized);
+        }
         base.candidates = candidates;
         base.candidateSource = { from_rules, from_story };
         if (candidates.length === 0) {
@@ -950,8 +960,12 @@ export async function runAgentWorkflow(
 
         // ---- 阶段2 AI 决策：对候选清单逐项判断（防偷懒），只能选候选内 ----
         stages.push('decide');
+        // mandatory 同样做存在性校验（防 AI 编造/旧数据，避免任务标注不存在的路径）
+        const mandatory = (rules.mandatoryPaths ?? []).filter(
+            path => getPathValue(input.state, normalizePath(path)) !== undefined
+        );
         const decide_result = await executor.decide(
-            { story: input.story, candidates },
+            { story: input.story, candidates, mandatory },
             undefined
         );
         base.decide = decide_result;

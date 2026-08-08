@@ -73,6 +73,32 @@ describe('buildWorldbookPool（初始化分类 + 索引）', () => {
         expect(pool.aiMerged).toBe(true);
     });
 
+    test('强制更新（mandatory）：规则标 MANDATORY/必须/每轮 → 其管辖路径进 mandatoryPaths（通用机制）', () => {
+        const entries = [
+            rule_entry('[mvu_update] 11.BEAUTY RANKING: MANDATORY — 绝色榜轮换'),
+            rule_entry('[mvu_update] 每轮刷新 世界.当前时间'),
+            rule_entry('[mvu_update] 普通规则，无强制'),
+        ];
+        const aiByIndex = new Map([
+            [0, ['世界.绝色榜', '绝色.仙姿']],
+            [1, ['世界.当前时间']],
+            [2, ['主角.修为']],
+        ]);
+        const pool = buildWorldbookPool(entries, { aiByIndex });
+        // MANDATORY 规则的全部管辖路径强制
+        expect(pool.mandatoryPaths).toContain('世界.绝色榜');
+        expect(pool.mandatoryPaths).toContain('绝色.仙姿');
+        // 「每轮」规则也强制
+        expect(pool.mandatoryPaths).toContain('世界.当前时间');
+        // 普通规则不强制
+        expect(pool.mandatoryPaths).not.toContain('主角.修为');
+    });
+
+    test('无 AI 分池时无强制路径', () => {
+        const pool = buildWorldbookPool([rule_entry('[mvu_update] MANDATORY 规则')]);
+        expect(pool.mandatoryPaths).toEqual([]);
+    });
+
     test('下标对齐：输入含禁用/空条目时规则 AI 路径不错位（v1.10.1 修复）', () => {
         // 输入下标 1 是禁用条目、下标 3 是空内容条目——AI 归属按【输入下标】给
         const entries = [

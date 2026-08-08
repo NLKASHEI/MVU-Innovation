@@ -14,10 +14,12 @@
  * 纯逻辑零依赖（只拼字符串/对象），可独立单测。
  */
 
-/** 决策阶段提示词：对启发式候选清单逐项 Y/N 判断（防偷懒） */
+/** 决策阶段提示词：对启发式候选清单逐项 Y/N 判断（防偷懒 + 强制更新 + 跨轮上下文） */
 export function buildDecideTask(opts: {
     story: string;
     candidates: string[];
+    mandatory?: string[];
+    lastRound?: string;
     last_error?: string;
 }): string {
     const parts = [
@@ -36,10 +38,19 @@ export function buildDecideTask(opts: {
         '',
         '最近剧情：',
         opts.story || '（无）',
-        '',
-        '候选清单（必须逐项判断）：',
-        opts.candidates.length > 0 ? opts.candidates.join('\n') : '（无）',
     ];
+    if (opts.lastRound) {
+        parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
+    }
+    parts.push('', '候选清单（必须逐项判断）：');
+    if (opts.candidates.length > 0) {
+        for (const path of opts.candidates) {
+            const mark = opts.mandatory?.includes(path) ? '  ← MANDATORY：必须更新，不得输出 N' : '';
+            parts.push(`- ${path}${mark}`);
+        }
+    } else {
+        parts.push('（无）');
+    }
     if (opts.last_error) {
         parts.push('', '上次决策未通过校验，原因：' + opts.last_error, '请修正后重新输出。');
     }
@@ -81,6 +92,7 @@ export function buildAgentUpdateTask(opts: {
     observation: string;
     rules: string[];
     lore?: string[];
+    lastRound?: string;
     last_error?: string;
     /** 结构化输出模式（配合 json_schema）：要求模型输出 {analysis, json_patch} JSON */
     structured?: boolean;
@@ -128,6 +140,9 @@ export function buildAgentUpdateTask(opts: {
     }
     if (opts.lore && opts.lore.length > 0) {
         parts.push('', '相关世界书背景（理解世界用，不是更新规则）：', opts.lore.join('\n---\n'));
+    }
+    if (opts.lastRound) {
+        parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
     }
     if (opts.last_error) {
         parts.push('', '上次输出未通过本地校验，原因：' + opts.last_error, '请修正后重新输出。');

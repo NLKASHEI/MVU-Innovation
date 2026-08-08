@@ -31,6 +31,33 @@ describe('buildDecideTask', () => {
         expect(task).toContain('不要输出 <UpdateVariable> 更新块');
     });
 
+    test('强制更新路径标注 MANDATORY（防偷懒）', () => {
+        const task = buildDecideTask({
+            story: '',
+            candidates: ['世界.绝色榜', '主角.修为'],
+            mandatory: ['世界.绝色榜'],
+        });
+        expect(task).toContain('世界.绝色榜  ← MANDATORY：必须更新，不得输出 N');
+        expect(task).not.toContain('主角.修为  ←');
+    });
+
+    test('跨轮上下文（上一轮更新情况）注入', () => {
+        const task = buildDecideTask({
+            story: '',
+            candidates: ['a.b'],
+            lastRound: '更新了 1 个变量：a.b',
+        });
+        expect(task).toContain('上一轮更新情况');
+        expect(task).toContain('更新了 1 个变量：a.b');
+        const update_task = buildAgentUpdateTask({
+            story: '',
+            observation: '',
+            rules: [],
+            lastRound: '上轮无实际更新',
+        });
+        expect(update_task).toContain('上一轮更新情况');
+    });
+
     test('失败原因会被喂回', () => {
         const task = buildDecideTask({ story: '', candidates: [], last_error: '决策路径不存在' });
         expect(task).toContain('决策路径不存在');

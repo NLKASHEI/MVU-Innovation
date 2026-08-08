@@ -473,6 +473,33 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
         expect(result.candidateSource).toEqual({ from_rules: 1, from_story: 1 });
     });
 
+    test('强制更新路径每轮必进候选并传给决策（通用机制，防偷懒）', async () => {
+        const seen: { candidates: string[]; mandatory?: string[] }[] = [];
+        const executor = buildExecutor({
+            readRules: async () => ({
+                entries: ['MANDATORY 规则'],
+                raw: '',
+                extraPaths: ['理.好感度'],
+                mandatoryPaths: ['理.心情', '不存在.路径'],
+            }),
+            decide: async input => {
+                seen.push({ candidates: input.candidates, mandatory: input.mandatory });
+                return { text: '理.好感度: Y\n理.心情: Y', raw: '' };
+            },
+        });
+        const result = await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 3,
+            loopThreshold: 2,
+        });
+        // 强制路径（存在性校验后）必进候选
+        expect(seen[0].candidates).toContain('理.心情');
+        // 不存在的强制路径被过滤
+        expect(seen[0].candidates).not.toContain('不存在.路径');
+        // mandatory 传入决策（任务里标注「必须更新」）
+        expect(seen[0].mandatory).toEqual(['理.心情']);
+        expect(result.termination).toBe('done');
+    });
+
     test('启发式候选为空 → no_change，不发模型请求', async () => {
         const calls: string[] = [];
         const executor = buildExecutor({

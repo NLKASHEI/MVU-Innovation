@@ -60,6 +60,9 @@ import { useDataStore } from '@/store';
 /** 最近一次工作流结果（供面板显示） */
 let last_workflow_result: AgentWorkflowResult | null = null;
 
+/** 跨轮上下文：上一轮更新摘要（喂回下一轮 decide/update 任务，解决「不看前一层输入」） */
+let last_round_summary: string | null = null;
+
 export function getLastWorkflowResult(): AgentWorkflowResult | null {
     return last_workflow_result;
 }
@@ -97,6 +100,10 @@ export interface UpdateCallDetail {
     block_preview: string;
     /** 模型原始输出（截断预览） */
     raw_preview: string;
+    /** 完整输入提示词（DEBUG 面板） */
+    fullTask: string;
+    /** 完整模型输出（DEBUG 面板） */
+    fullRaw: string;
     duration_ms: number;
     /** 喂回给模型的失败原因（第 2 次起） */
     fed_error?: string;
@@ -106,6 +113,10 @@ export interface UpdateCallDetail {
 export interface DecideCallDetail {
     /** 决策输出（截断预览） */
     text_preview: string;
+    /** 完整输入提示词（DEBUG 面板） */
+    fullTask: string;
+    /** 完整模型输出（DEBUG 面板） */
+    fullRaw: string;
     /** 解析出的决策路径数 */
     parsed_count: number;
     duration_ms: number;
@@ -175,6 +186,11 @@ function preview(text: string, max = 200): string {
     const t = String(text ?? '').trim();
     return t.length > max ? t.slice(0, max) + '…' : t;
 }
+
+/** 列表预览放宽上限（完整内容在 fullTask/fullRaw，展开区不截断） */
+const PREVIEW_BLOCK = 2000;
+const PREVIEW_RAW = 4000;
+const PREVIEW_TEXT = 2000;
 
 // ---------------------------------------------------------------------------
 // 状态与剧情上下文
@@ -305,6 +321,7 @@ interface PersistedPool {
         keys: string[];
     }[];
     rulePaths: string[];
+    mandatoryPaths: string[];
     rulePathToRules: [string, string[]][];
     strategyCount: { constant: number; selective: number; vectorized: number };
     aiMerged: boolean;
@@ -412,6 +429,7 @@ function savePersistedPool(state: PoolState): void {
                 keys: e.keys,
             })),
             rulePaths: [...state.pool.rulePaths],
+            mandatoryPaths: [...(state.pool.mandatoryPaths ?? [])],
             rulePathToRules: [...state.pool.rulePathToRules.entries()],
             strategyCount: { ...state.pool.strategyCount },
             aiMerged: state.pool.aiMerged,
@@ -451,6 +469,7 @@ function poolFromPersisted(p: PersistedPool): PoolState {
         entries,
         rules: entries.filter(e => e.marker === 'rule'),
         rulePaths: [...p.rulePaths],
+        mandatoryPaths: [...(p.mandatoryPaths ?? [])],
         rulePathToRules: new Map(p.rulePathToRules),
         strategyCount: { ...p.strategyCount },
         aiMerged: p.aiMerged,
@@ -988,17 +1007,29 @@ export async function runAgentWorkflowForMessage(
                 raw: contents.join('\n---\n'),
                 lore: [],
                 extraPaths: state.pool.rulePaths,
+                mandatoryPaths: state.pool.mandatoryPaths,
             };
         },
-        // 阶段2 AI 决策：对启发式候选清单逐项 Y/N 判断（防偷懒）。
-        // 候选已由本地启发式筛过（规则路径 ∪ AI 深化路径 ∪ 剧情命中），决策只能选候选内。
-        decide: async (input: { story: string; candidates: string[] }, last_error?: string) => {
+        // 阶段2 AI 决策：对启发式候选清单逐项 Y/N 判断（防偷懒 + 强制更新 + 跨轮上下文）。
+        // 候选已由本地启发式筛过（AI 规则路径 ∪ 剧情命中），决策只能选候选内。
+        decide: async (
+            input: { story: string; candidates: string[]; mandatory?: string[] },
+            last_error?: string
+        ) => {
             const call_started = Date.now();
-            const task = buildDecideTask({ story: input.story, candidates: input.candidates, last_error });
+            const task = buildDecideTask({
+                story: input.story,
+                candidates: input.candidates,
+                mandatory: input.mandatory,
+                lastRound: last_round_summary,
+                last_error,
+            });
             const config = buildDecideRawConfig({ task, custom_api });
             const text = normalizeGenerateText(await generateRaw(config));
             entry.decide = {
-                text_preview: preview(text, 400),
+                text_preview: preview(text, PREVIEW_TEXT),
+                fullTask: task,
+                fullRaw: text,
                 parsed_count: parseDecidePaths(text, input.candidates).length,
                 duration_ms: Date.now() - call_started,
             };
@@ -1032,16 +1063,19 @@ export async function runAgentWorkflowForMessage(
             const call_started = Date.now();
             let structured = true;
             let result: unknown;
+            let task = '';
             try {
+                task = buildAgentUpdateTask({
+                    story: ctx.story,
+                    observation: ctx.observation,
+                    rules: ctx.rules,
+                    lore: ctx.lore,
+                    lastRound: last_round_summary,
+                    last_error,
+                    structured: true,
+                });
                 const config = buildAgentUpdateRawConfig({
-                    task: buildAgentUpdateTask({
-                        story: ctx.story,
-                        observation: ctx.observation,
-                        rules: ctx.rules,
-                        lore: ctx.lore,
-                        last_error,
-                        structured: true,
-                    }),
+                    task,
                     custom_api,
                     json_schema: createJsonPatchResponseSchema(),
                 });
@@ -1049,14 +1083,16 @@ export async function runAgentWorkflowForMessage(
             } catch {
                 // 降级：纯文本指令（模型输出 <UpdateVariable> 块）
                 structured = false;
+                task = buildAgentUpdateTask({
+                    story: ctx.story,
+                    observation: ctx.observation,
+                    rules: ctx.rules,
+                    lore: ctx.lore,
+                    lastRound: last_round_summary,
+                    last_error,
+                });
                 const fallback_config = buildAgentUpdateRawConfig({
-                    task: buildAgentUpdateTask({
-                        story: ctx.story,
-                        observation: ctx.observation,
-                        rules: ctx.rules,
-                        lore: ctx.lore,
-                        last_error,
-                    }),
+                    task,
                     custom_api,
                 });
                 result = await generateRaw(fallback_config);
@@ -1067,8 +1103,10 @@ export async function runAgentWorkflowForMessage(
             entry.updates.push({
                 attempt,
                 structured,
-                block_preview: preview(block),
-                raw_preview: preview(text, 400),
+                block_preview: preview(block, PREVIEW_BLOCK),
+                raw_preview: preview(text, PREVIEW_RAW),
+                fullTask: task,
+                fullRaw: text,
                 duration_ms: Date.now() - call_started,
                 fed_error: last_error,
             });
@@ -1106,6 +1144,29 @@ export async function runAgentWorkflowForMessage(
           ? [workflow_result.selfCheck.reason]
           : [];
     pushDebugEntry(entry);
+
+    // ---- 跨轮上下文：记录本轮摘要，下一轮 decide/update 任务里喂回 ----
+    // 解决「不看前一层输入」：模型知道上一轮更新了哪些变量、更新块是什么，
+    // 避免重复改/漏改（如绝色榜「strictly avoid repeating recently used names」）。
+    if (workflow_result.termination === 'done' && entry.applied && entry.due) {
+        const applied_block =
+            entry.updates.length > 0 ? entry.updates[entry.updates.length - 1].block_preview : '';
+        last_round_summary = [
+            `更新了 ${entry.due.length} 个变量：${entry.due.join('、')}`,
+            applied_block ? `更新块：${applied_block}` : '',
+            `时间：${new Date().toLocaleTimeString()}`,
+        ]
+            .filter(Boolean)
+            .join('\n');
+    } else if (workflow_result.termination === 'done') {
+        last_round_summary = `上轮无实际更新（决策 ${entry.due?.length ?? 0} 个，未应用）`;
+    } else if (workflow_result.termination === 'no_change') {
+        last_round_summary = '上轮决策无变化（none）';
+    } else {
+        last_round_summary = `上轮终止：${workflow_result.termination}${
+            workflow_result.error ? `（${workflow_result.error}）` : ''
+        }`;
+    }
 
     if (workflow_result.termination === 'error') {
         console.error('[革新版·Agent工作流] 失败', workflow_result.error);

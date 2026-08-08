@@ -55,6 +55,8 @@ export interface WorldbookPool {
     rulePaths: string[];
     /** 精确索引：AI 给出的规则管辖路径 → 管辖它的规则内容 */
     rulePathToRules: Map<string, string[]>;
+    /** 强制更新路径（规则内容含 MANDATORY/必须/每轮 等 → 其 AI 管辖路径；每轮必进候选） */
+    mandatoryPaths: string[];
     /** 池内各策略计数 */
     strategyCount: { constant: number; selective: number; vectorized: number };
     /** 是否已合并 AI 规则分池 */
@@ -62,6 +64,9 @@ export interface WorldbookPool {
     /** 索引统计 */
     indexStats: PoolIndexStats;
 }
+
+/** 强制更新标记（规则内容出现即视为该规则管辖的路径每轮必须更新） */
+const MANDATORY_RULE_RE = /MANDATORY|mandatory|必须|每轮|always|always update/i;
 
 /**
  * AI 规则分池结果：AI 逐条阅读规则后确定的「规则条目输入下标 → 管辖变量路径」。
@@ -203,13 +208,16 @@ export function buildWorldbookPool(
     // 只作用于规则条目——背景条目不 AI 分池（绿灯 keys + 文本兜底足够）
     const rulePaths: string[] = [];
     const rulePathToRules = new Map<string, string[]>();
-    const addRulePath = (path: string, ruleContent: string) => {
+    const mandatoryPaths: string[] = [];
+    const addRulePath = (path: string, ruleContent: string, mandatory: boolean) => {
         const normalized = normalizePath(path);
         if (!normalized || normalized.startsWith('_')) return;
         if (!rulePaths.includes(normalized)) rulePaths.push(normalized);
         const list = rulePathToRules.get(normalized) ?? [];
         if (!list.includes(ruleContent)) list.push(ruleContent);
         rulePathToRules.set(normalized, list);
+        // 强制更新（通用机制）：规则内容标了 MANDATORY/必须/每轮 等 → 该规则管辖的路径每轮必进候选
+        if (mandatory && !mandatoryPaths.includes(normalized)) mandatoryPaths.push(normalized);
     };
     const aiByIndex = opts?.aiByIndex;
     if (aiByIndex && aiByIndex.size > 0) {
@@ -218,8 +226,9 @@ export function buildWorldbookPool(
             if (pooled_idx === undefined) continue;
             const entry = pooled[pooled_idx];
             if (!entry || entry.marker !== 'rule') continue;
+            const mandatory = MANDATORY_RULE_RE.test(entry.content);
             for (const path of paths) {
-                addRulePath(path, entry.content);
+                addRulePath(path, entry.content, mandatory);
             }
         }
     }
@@ -242,6 +251,7 @@ export function buildWorldbookPool(
         rules,
         rulePaths,
         rulePathToRules,
+        mandatoryPaths,
         strategyCount,
         aiMerged,
         indexStats: {

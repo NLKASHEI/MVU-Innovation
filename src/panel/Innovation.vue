@@ -132,8 +132,24 @@
                                 <p class="nlkaleido-debug-line">
                                     <b>AI 决策</b>（{{ entry.decide.duration_ms }}ms）：决策
                                     {{ entry.decide.parsed_count }} 个变量
+                                    <button
+                                        class="menu_button nlkaleido-debug-toggle"
+                                        @click="toggleFull(entry.id, 'decide')"
+                                    >
+                                        {{ fullOpen[entry.id + ':decide'] ? '收起' : '查看完整输入/输出' }}
+                                    </button>
                                 </p>
                                 <pre class="nlkaleido-debug-pre">{{ entry.decide.text_preview }}</pre>
+                                <div v-if="fullOpen[entry.id + ':decide']">
+                                    <p class="nlkaleido-debug-line"><b>完整输入提示词：</b></p>
+                                    <pre class="nlkaleido-debug-pre nlkaleido-debug-full">{{
+                                        entry.decide.fullTask
+                                    }}</pre>
+                                    <p class="nlkaleido-debug-line"><b>完整模型输出：</b></p>
+                                    <pre class="nlkaleido-debug-pre nlkaleido-debug-full">{{
+                                        entry.decide.fullRaw
+                                    }}</pre>
+                                </div>
                             </div>
                             <p v-if="entry.worldbook" class="nlkaleido-debug-line">
                                 <b>世界书扫描</b>（{{ entry.worldbook.duration_ms }}ms）：
@@ -189,8 +205,28 @@
                                     <span v-if="upd.fed_error" class="nlkaleido-warn">
                                         喂回：{{ upd.fed_error }}
                                     </span>
+                                    <button
+                                        class="menu_button nlkaleido-debug-toggle"
+                                        @click="toggleFull(entry.id, 'update' + upd.attempt)"
+                                    >
+                                        {{
+                                            fullOpen[entry.id + ':update' + upd.attempt]
+                                                ? '收起'
+                                                : '查看完整输入/输出'
+                                        }}
+                                    </button>
                                 </p>
                                 <pre class="nlkaleido-debug-pre">{{ upd.block_preview }}</pre>
+                                <div v-if="fullOpen[entry.id + ':update' + upd.attempt]">
+                                    <p class="nlkaleido-debug-line"><b>完整输入提示词：</b></p>
+                                    <pre class="nlkaleido-debug-pre nlkaleido-debug-full">{{
+                                        upd.fullTask
+                                    }}</pre>
+                                    <p class="nlkaleido-debug-line"><b>完整模型输出：</b></p>
+                                    <pre class="nlkaleido-debug-pre nlkaleido-debug-full">{{
+                                        upd.fullRaw
+                                    }}</pre>
+                                </div>
                             </div>
                             <p
                                 v-if="entry.validation_errors.length"
@@ -324,6 +360,13 @@ function toggleDebug(id: number) {
     expanded.value[id] = !expanded.value[id];
 }
 
+const fullOpen = ref<Record<string, boolean>>({});
+
+function toggleFull(id: number, key: string) {
+    const full_key = `${id}:${key}`;
+    fullOpen.value[full_key] = !fullOpen.value[full_key];
+}
+
 function formatTime(ts: number): string {
     const d = new Date(ts);
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
@@ -428,6 +471,17 @@ onUnmounted(() => {
     font-size: calc(var(--mainFontSize, 1rem) * 0.78);
     max-height: 8em;
     overflow-y: auto;
+}
+.nlkaleido-debug-toggle {
+    font-size: calc(var(--mainFontSize, 1rem) * 0.75);
+    padding: 0.1rem 0.4rem;
+    margin-left: 0.4rem;
+    vertical-align: middle;
+}
+.nlkaleido-debug-full {
+    /* 展开区不截断：完整输入/输出原样显示 */
+    max-height: none;
+    max-width: 100%;
 }
 .nlkaleido-debug-update {
     margin-top: 0.25rem;
