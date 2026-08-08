@@ -684,24 +684,12 @@ async function aiClassifyEntries(
             lines,
         ].join('\n');
         try {
-            // 首选结构化输出（json_schema，解析成功率大增）；provider 不支持时降级纯文本
+            // 首选结构化输出（json_schema，解析成功率大增）；provider 不支持或解析失败时降级纯文本
             // API 来源跟随原版「额外模型解析配置」（模型来源=自定义时用独立 API）
             const custom_api = buildExtraCustomApi();
-            let text = '';
-            try {
-                const config = buildDecideRawConfig({
-                    task,
-                    custom_api,
-                    max_tokens: 2000,
-                    json_schema: createAiClassifySchema(),
-                });
-                text = normalizeGenerateText(await generateRaw(config));
-            } catch {
-                const fallback_config = buildDecideRawConfig({ task, custom_api, max_tokens: 2000 });
-                text = normalizeGenerateText(await generateRaw(fallback_config));
-            }
-            const parsed = parseAiClassification(text, batchIndexes.length);
-            if (parsed) {
+            const apply_batch = (text: string): boolean => {
+                const parsed = parseAiClassification(text, batchIndexes.length);
+                if (!parsed) return false;
                 for (const [local_idx, paths] of parsed.paths) {
                     const global_idx = batchIndexes[local_idx];
                     if (global_idx !== undefined) byIndex.set(global_idx, paths);
@@ -710,10 +698,42 @@ async function aiClassifyEntries(
                     const global_idx = batchIndexes[local_idx];
                     if (global_idx !== undefined) mandatoryByIndex.set(global_idx, m);
                 }
-                batchesOk++;
+                return true;
+            };
+            // 1. json_schema 结构化
+            let text = '';
+            let applied = false;
+            try {
+                const config = buildDecideRawConfig({
+                    task,
+                    custom_api,
+                    max_tokens: 2000,
+                    json_schema: createAiClassifySchema(),
+                });
+                text = normalizeGenerateText(await generateRaw(config));
+                applied = apply_batch(text);
+            } catch (e) {
+                console.warn('[革新版·Agent] AI 分池 json_schema 失败，降级文本', e);
             }
-        } catch {
-            /* 本批失败：跳过继续，不影响其余批 */
+            // 2. 解析失败（模型输出不合 schema）→ 文本模式重试
+            if (!applied) {
+                try {
+                    const fallback_config = buildDecideRawConfig({ task, custom_api, max_tokens: 2000 });
+                    text = normalizeGenerateText(await generateRaw(fallback_config));
+                    applied = apply_batch(text);
+                } catch (e) {
+                    console.warn('[革新版·Agent] AI 分池文本模式也失败', e);
+                }
+            }
+            if (applied) {
+                batchesOk++;
+            } else {
+                console.warn(
+                    `[革新版·Agent] AI 分池批次 ${b + 1}/${batches.length} 输出无法解析（json_schema 与文本均失败），已跳过`
+                );
+            }
+        } catch (e) {
+            console.warn('[革新版·Agent] AI 分池批次异常', e);
         }
     }
 

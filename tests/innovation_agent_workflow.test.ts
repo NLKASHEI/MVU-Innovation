@@ -138,6 +138,12 @@ describe('parseDecidePaths（AI 决策清单解析）', () => {
         ).toEqual(['世界.当前时间', '主角.境界']);
     });
 
+    test('模型照抄模板字面量「路径: Y」→ 跳过不产生假路径（v1.12.10 修复）', () => {
+        expect(
+            parseDecidePaths('路径: N\n路径: Y\n路径: Y\n主角.容貌: Y')
+        ).toEqual(['主角.容貌']);
+    });
+
     test('支持是/否 与冒号变体', () => {
         expect(parseDecidePaths('理.好感度：是\n世界.时间 : 否')).toEqual(['理.好感度']);
     });

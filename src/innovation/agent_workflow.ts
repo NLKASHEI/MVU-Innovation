@@ -376,6 +376,8 @@ export function parseDecidePaths(raw: string, allowed?: string[]): string[] {
         const judge = trimmed.match(/^(.+?)\s*[:：]\s*(Y|N|YES|NO|y|n|是|否)\s*$/i);
         if (judge) {
             const path = judge[1].trim();
+            // 模板占位符字面量（模型照抄示例「路径: Y」）→ 跳过（v1.12.10 兜底）
+            if (/^(路径|path|变量|variable)$/i.test(path)) continue;
             const verdict = judge[2].toUpperCase();
             if (path && (verdict === 'Y' || verdict === 'YES' || verdict === '是')) {
                 push(path);

@@ -16,6 +16,9 @@ describe('buildDecideMessages（第一轮：完整正文喂入）', () => {
         expect(messages[0].role).toBe('system');
         expect(messages[0].content).toContain('逐项判断，不得省略任何一行');
         expect(messages[0].content).toContain('none');
+        // 示例用真实路径而非字面「路径」占位符（v1.12.10：模型曾照抄「路径: Y」导致全部被过滤）
+        expect(messages[0].content).toContain('主角.容貌: Y');
+        expect(messages[0].content).not.toContain('路径: Y    （需要更新）');
         expect(messages[1].role).toBe('user');
         expect(messages[1].content).toContain('最近剧情');
         expect(messages[1].content).toContain('剧情文本');
