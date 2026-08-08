@@ -280,45 +280,15 @@ export function buildVariableIndex(state: unknown, max_paths: number = 200): str
     return text;
 }
 
-const COMMAND_PATH_RE = /_\.(?:set|insert|assign|remove|unset|delete|add)\s*\(\s*(['"])([^'"]+)\1/g;
-const DOTTED_PATH_RE = /(?:stat_data\.)?([\p{L}\p{N}_][\p{L}\p{N}_-]*(?:\.[\p{L}\p{N}_][\p{L}\p{N}_-]*)+)/gu;
-
-/**
- * 从世界书 [mvu_update] 规则内容中提取「规则声明的变量路径」——
- * 作为候选搜索的来源之一（规则提到谁，谁就可能是本轮要更新的）。
- * @param rules 规则内容数组
- * @returns 路径数组（去重保序，已去掉 stat_data. 前缀）
- */
-export function extractRulePaths(rules: string[]): string[] {
-    const paths: string[] = [];
-    const push = (path: string) => {
-        const normalized = normalizePath(path);
-        // 跳过内建前缀（_.set 等命令文本）
-        if (normalized.startsWith('_')) return;
-        if (normalized && !paths.includes(normalized)) {
-            paths.push(normalized);
-        }
-    };
-    for (const rule of rules) {
-        if (!rule) continue;
-        for (const m of rule.matchAll(COMMAND_PATH_RE)) {
-            push(m[2]);
-        }
-        for (const m of rule.matchAll(DOTTED_PATH_RE)) {
-            push(m[1]);
-        }
-    }
-    return paths;
-}
-
 /**
  * 启发式搜索「本轮候选变量」（零模型调用，保证效率与准确度）：
- *   1. 规则路径：世界书 [mvu_update] 规则声明涉及的路径
+ *   1. 规则路径：**AI 规则分池给出的管辖路径**（worldbook_pool 产物，经 extraPaths 传入；
+ *      v1.11.4 起无正则提取——规则→路径映射全部由 AI 分批完整读取产生）
  *   2. 剧情命中：剧情文本包含变量路径的最长段（如剧情出现「好感度」→ 候选 理.好感度）
  * 合并去重后返回候选清单；模型必须在候选内决策（候选 = 可见范围，防越权）。
  * @param state stat_data 对象
  * @param story 最近剧情文本
- * @param rule_paths 规则声明的路径
+ * @param rule_paths AI 分池给出的规则管辖路径
  * @returns 候选清单与来源统计
  */
 export function searchCandidates(
@@ -335,8 +305,14 @@ export function searchCandidates(
         if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
     };
 
-    // 1. 规则路径（先入，保序优先）
-    for (const path of rule_paths) push(path);
+    // 1. AI 分池给出的规则路径（先入，保序优先）——必须真实存在于 stat_data：
+    //    防 AI 编造/旧数据残留污染候选清单
+    for (const path of rule_paths) {
+        const normalized = normalizePath(path);
+        if (!normalized) continue;
+        if (getPathValue(state, normalized) === undefined) continue;
+        push(normalized);
+    }
     const from_rules = candidates.length;
 
     // 2. 剧情命中：路径段出现在剧情中（取最长段；同长取叶子段——叶子更具体，
@@ -955,9 +931,10 @@ export async function runAgentWorkflow(
         const rules = await executor.readRules();
         base.rules = rules;
 
-        // ---- 阶段1 启发式候选搜索（本地）：规则路径 ∪ AI 深化路径 ∪ 剧情命中路径 ----
+        // ---- 阶段1 启发式候选搜索（本地）：AI 分池规则路径 ∪ 剧情命中路径 ----
         stages.push('candidate_search');
-        const rule_paths = [...extractRulePaths(rules.entries), ...(rules.extraPaths ?? [])];
+        // 规则路径唯一来源 = AI 规则分池（worldbook_pool 经 extraPaths 传入）；无正则提取
+        const rule_paths = rules.extraPaths ?? [];
         const { candidates, from_rules, from_story } = searchCandidates(
             input.state,
             input.story,

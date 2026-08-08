@@ -1,25 +1,24 @@
 /**
- * [革新版·世界书缓存池 v1.10.2] 初始化分类 + 规则语义索引（纯逻辑，零 MVU 依赖）。
+ * [革新版·世界书缓存池 v1.11.4] 初始化分类 + AI 规则语义索引（纯逻辑，零 MVU 依赖）。
  *
- * 现实依据（v1.10.2 修正）：卡作者只写 [mvu_update] 规则标记，普通背景条目不写标记——
- * AI 分池只瞄准【规则条目】（AI 逐条阅读规则，输出管辖路径，补全散文规则的路径映射）；
- * 背景条目不 AI 分池（绿灯 keys + 文本兜底足够，对 ≤3 条辅助背景的语义归属不抵成本）。
+ * 现实依据（v1.11.4 修正）：**规则→路径 的映射全部由 AI 分池产生，无正则提取**——
+ * AI 分批【完整】阅读 [mvu_update] 规则条目（一次读不完就慢慢读，分批次），
+ * 输出每条规则管辖的变量路径；正则从规则文本猜路径（_.set/点分路径）是垃圾来源
+ * （会把 Analysis 清单里的 "1.TIME" 误当路径），已彻底删除。
  *
  * 索引体系（每条都有语义依据、真实被查询）：
- *   1. rulePaths / rulePathToRules（精确层）
- *      依据：规则【显式声明】的路径（正则提取）∪ AI 阅读规则补全的管辖路径。
+ *   1. rulePaths / rulePathToRules（精确层，唯一来源 = AI 规则分池）
+ *      依据：AI 逐条阅读规则后给出的管辖路径（aiByIndex）。
  *      用途：候选搜索路径来源；fetch 时决策路径精确命中直接取规则 O(1)。
  *   2. 背景相关性打分（启发机制）
  *      依据：条目自带的绿灯 keys（ST 激活语义）+ 内容/条目名与候选路径段的命中。
  *      用途：fetch 背景时按 候选路径全集 + 剧情 打分排序，要改什么就搜什么背景。
+ *   3. pathHitsText（查询兜底层）：AI 分池未覆盖时，规则内容确实提到路径段才兜底命中。
  *
  * 每轮工作流直接查池（不再重复读取世界书）。
  */
 
-import {
-    extractRulePaths,
-    normalizePath,
-} from '@/innovation/agent_workflow';
+import { normalizePath } from '@/innovation/agent_workflow';
 import { WorldbookEntryLike, isPlotEntry, isUpdateRuleEntry } from '@/innovation/agent_worldbook';
 
 /** 条目类别 */
@@ -40,7 +39,7 @@ export interface PooledEntry {
 
 /** 索引统计（面板展示「建了什么索引」） */
 export interface PoolIndexStats {
-    /** 规则声明的路径数（rulePaths，正则 + AI 分类） */
+    /** 规则管辖路径数（rulePaths，唯一来源 = AI 规则分池） */
     rulePaths: number;
     /** 路径→规则 精确映射键数（rulePathToRules） */
     rulePathToRules: number;
@@ -52,9 +51,9 @@ export interface WorldbookPool {
     entries: PooledEntry[];
     /** 规则条目（[mvu_update]） */
     rules: PooledEntry[];
-    /** 规则声明的变量路径（去重保序；正则提取 + AI 阅读规则补全） */
+    /** 规则管辖路径（去重保序；唯一来源 = AI 规则分池，无正则提取） */
     rulePaths: string[];
-    /** 精确索引：规则声明的路径（正则 + AI）→ 声明它的规则内容 */
+    /** 精确索引：AI 给出的规则管辖路径 → 管辖它的规则内容 */
     rulePathToRules: Map<string, string[]>;
     /** 池内各策略计数 */
     strategyCount: { constant: number; selective: number; vectorized: number };
@@ -199,7 +198,9 @@ export function buildWorldbookPool(
         if (marker === 'rule') rules.push(item);
     }
 
-    // 精确层：规则声明的路径（正则提取），建 路径→规则 映射
+    // 精确层（v1.11.4 起唯一来源 = AI 规则分池，无正则提取）：
+    // AI 逐条阅读规则确定的管辖路径（按输入下标经 indexMap 映射，防错位）；
+    // 只作用于规则条目——背景条目不 AI 分池（绿灯 keys + 文本兜底足够）
     const rulePaths: string[] = [];
     const rulePathToRules = new Map<string, string[]>();
     const addRulePath = (path: string, ruleContent: string) => {
@@ -210,14 +211,6 @@ export function buildWorldbookPool(
         if (!list.includes(ruleContent)) list.push(ruleContent);
         rulePathToRules.set(normalized, list);
     };
-    for (const rule of rules) {
-        for (const path of extractRulePaths([rule.content])) {
-            addRulePath(path, rule.content);
-        }
-    }
-
-    // AI 规则分池：AI 逐条阅读规则确定的管辖路径（按输入下标经 indexMap 映射，防错位）
-    // 只作用于规则条目——背景条目不 AI 分池（绿灯 keys + 文本兜底足够）
     const aiByIndex = opts?.aiByIndex;
     if (aiByIndex && aiByIndex.size > 0) {
         for (const [input_idx, paths] of aiByIndex) {
@@ -226,9 +219,7 @@ export function buildWorldbookPool(
             const entry = pooled[pooled_idx];
             if (!entry || entry.marker !== 'rule') continue;
             for (const path of paths) {
-                const normalized = normalizePath(path);
-                if (!normalized || normalized.startsWith('_')) continue;
-                addRulePath(normalized, entry.content);
+                addRulePath(path, entry.content);
             }
         }
     }

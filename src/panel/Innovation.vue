@@ -150,9 +150,15 @@
                                 灯效 蓝{{ entry.pool.strategy.constant }} / 绿{{ entry.pool.strategy.selective }} /
                                 向量{{ entry.pool.strategy.vectorized }}）·
                                 索引 规则路径{{ entry.pool.indexStats.rulePaths }} /
-                                精确映射{{ entry.pool.indexStats.rulePathToRules }} /
                                 精确映射{{ entry.pool.indexStats.rulePathToRules }} ·
-                                AI 规则分池 {{ entry.pool.aiMerged ? '已合并' : '未触发' }}
+                                AI 规则分池
+                                {{
+                                    entry.pool.aiMerged
+                                        ? '已合并'
+                                        : entry.pool.aiAttempted
+                                          ? '尝试过（失败）'
+                                          : '未触发'
+                                }}
                                 <span v-if="entry.pool.aiBatchesTotal > 0">
                                     （{{ entry.pool.aiBatchesOk }}/{{ entry.pool.aiBatchesTotal }} 批，
                                     {{ entry.pool.aiDurationMs }}ms）

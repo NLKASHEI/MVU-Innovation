@@ -4,7 +4,6 @@ import {
     buildObservation,
     buildVariableIndex,
     enumerateLeafPaths,
-    extractRulePaths,
     filterRelevantLore,
     filterRelevantRules,
     parseDecidePaths,
@@ -19,7 +18,12 @@ const STATE = { 理: { 好感度: 42, 心情: '开心' }, 世界: { 时间: '19:
 
 function buildExecutor(overrides: Partial<AgentWorkflowExecutor> = {}): AgentWorkflowExecutor {
     return {
-        readRules: async () => ({ entries: ['理.好感度 每轮更新'], raw: '理.好感度 每轮更新' }),
+        // 模拟 AI 规则分池已给出管辖路径（v1.11.4 起规则路径唯一来源 = AI，无正则）
+        readRules: async () => ({
+            entries: ['理.好感度 每轮更新'],
+            raw: '理.好感度 每轮更新',
+            extraPaths: ['理.好感度'],
+        }),
         decide: async () => ({ text: '理.好感度: Y\n世界.时间: N', raw: '' }),
         fetchRules: async () => ({
             entries: ['理.好感度 每轮更新'],
@@ -68,28 +72,8 @@ describe('enumerateLeafPaths', () => {
     });
 });
 
-describe('extractRulePaths（规则声明的路径）', () => {
-    test('从 _.set 命令提取', () => {
-        expect(
-            extractRulePaths(["_.set('理.好感度', 5); _.set('世界.时间','19:30');"])
-        ).toEqual(['理.好感度', '世界.时间']);
-    });
-
-    test('支持 stat_data. 前缀与正文点分路径', () => {
-        expect(extractRulePaths(['stat_data.理.好感度 每轮更新', '当 理.心情 低于 30 时'])).toEqual([
-            '理.好感度',
-            '理.心情',
-        ]);
-    });
-
-    test('去重保序，空输入返回空', () => {
-        expect(extractRulePaths(['a.b a.b a.c'])).toEqual(['a.b', 'a.c']);
-        expect(extractRulePaths([])).toEqual([]);
-    });
-});
-
 describe('searchCandidates（启发式候选搜索）', () => {
-    test('规则路径并入候选', () => {
+    test('规则路径并入候选（AI 分池给出的路径）', () => {
         const { candidates, from_rules } = searchCandidates(STATE, '', ['理.好感度', '理.好感度']);
         expect(candidates).toEqual(['理.好感度']);
         expect(from_rules).toBe(1);
@@ -107,6 +91,19 @@ describe('searchCandidates（启发式候选搜索）', () => {
     test('规则+剧情合并去重', () => {
         const { candidates } = searchCandidates(STATE, '好感度暴涨', ['理.好感度']);
         expect(candidates).toEqual(['理.好感度']);
+    });
+
+    test('规则假路径过滤：Analysis 清单（1.TIME 等）不存在于状态 → 丢弃（v1.11.4 修复）', () => {
+        const rule_paths = [
+            '理.好感度',
+            '1.TIME',
+            '3.PROTAGONIST',
+            '15.ENCOUNTER',
+            '主角.不存在',
+        ];
+        const { candidates, from_rules } = searchCandidates(STATE, '', rule_paths);
+        expect(candidates).toEqual(['理.好感度']);
+        expect(from_rules).toBe(1);
     });
 
     test('超短段不参与剧情命中', () => {
@@ -416,7 +413,7 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
         const executor = buildExecutor({
             readRules: async () => {
                 calls.push('read');
-                return { entries: ['理.好感度 每轮更新'], raw: '' };
+                return { entries: ['理.好感度 每轮更新'], raw: '', extraPaths: ['理.好感度'] };
             },
             decide: async () => {
                 calls.push('decide');

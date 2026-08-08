@@ -13,8 +13,23 @@ export async function onMessageReceived(
     // 革新版自己监听 MESSAGE_RECEIVED 执行 agent 工作流（决策→拉取→观察→更新→校验），
     // 避免两条链路同时跑（原版找不到 <UpdateVariable> 标签报错 + 变量双写）。
     // 原版的「依次请求失败后重试」循环也随之不再触发（革新版有独立的失败喂回重试）。
+    // 但聊天页面变量状态占位符 <StatusPlaceHolderImpl/> 仍要注入（用户体验）。
     if (loadInnovationSettings(localStorage).agentEnabled) {
         console.debug('[MVU] 革新版 Agent 已接管更新链路，跳过原版额外模型解析');
+        try {
+            const chat_message = getChatMessages(message_id).at(-1);
+            if (chat_message && chat_message.role !== 'user') {
+                const content = String(chat_message.message ?? '');
+                if (!content.includes('<StatusPlaceHolderImpl/>')) {
+                    await setChatMessages(
+                        [{ message_id, message: content + '\n\n<StatusPlaceHolderImpl/>' }],
+                        { refresh: 'affected' }
+                    );
+                }
+            }
+        } catch {
+            /* 占位符注入失败不影响工作流 */
+        }
         return;
     }
 

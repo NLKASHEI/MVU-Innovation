@@ -121,6 +121,8 @@ export interface PoolDebugDetail {
     strategy: { constant: number; selective: number; vectorized: number };
     /** 是否已合并 AI 语义分池 */
     aiMerged: boolean;
+    /** AI 规则分池是否已尝试过（失败也置位，面板显示「尝试过（失败）」） */
+    aiAttempted: boolean;
     /** AI 规则分池耗时 ms（逐条阅读规则条目） */
     aiDurationMs: number;
     /** AI 分池成功批数/总批数 */
@@ -275,8 +277,10 @@ interface PoolState {
     scan: WorldbookScanDetail;
     /** AI 规则分池耗时 ms（逐条阅读规则条目；失败为 0） */
     aiDurationMs: number;
-    /** AI 分池是否已尝试过（失败不重复打） */
+    /** AI 分池是否已尝试过（失败也置位，面板显示「尝试过（失败）」） */
     aiAttempted: boolean;
+    /** AI 分池最近一次尝试时间（失败后 AI_RETRY_MS 可自动重试，不永久放弃） */
+    aiLastAttemptAt: number;
     /** AI 分池成功批数 */
     aiBatchesOk: number;
     /** AI 分池总批数 */
@@ -284,6 +288,9 @@ interface PoolState {
     /** 原始加载条目（已过滤：enabled 且 content 非空；供 AI 分池时重建池） */
     rawEntries: any[];
 }
+
+/** AI 分池失败后的自动重试间隔 */
+const AI_RETRY_MS = 10 * 60_000;
 
 /** 持久化池（localStorage；不含 rawEntries——可从 entries 还原） */
 interface PersistedPool {
@@ -305,6 +312,7 @@ interface PersistedPool {
     scan: WorldbookScanDetail;
     aiDurationMs: number;
     aiAttempted: boolean;
+    aiLastAttemptAt: number;
     aiBatchesOk: number;
     aiBatchesTotal: number;
 }
@@ -340,8 +348,8 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
                   rules: 0,
                   strategy: { constant: 0, selective: 0, vectorized: 0 },
                   aiMerged: false,
-                  aiDurationMs: 0,
-                  aiBatchesOk: 0,
+                  aiAttempted: false,
+                  aiDurationMs: 0,                  aiBatchesOk: 0,
                   aiBatchesTotal: 0,
                   indexStats: { rulePaths: 0, rulePathToRules: 0 },
                   error: pool_error,
@@ -355,6 +363,7 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
         rules: pool_state.pool.rules.length,
         strategy: { ...pool_state.pool.strategyCount },
         aiMerged: pool_state.pool.aiMerged,
+        aiAttempted: pool_state.aiAttempted,
         aiDurationMs: pool_state.aiDurationMs,
         aiBatchesOk: pool_state.aiBatchesOk,
         aiBatchesTotal: pool_state.aiBatchesTotal,
@@ -410,6 +419,7 @@ function savePersistedPool(state: PoolState): void {
             scan: state.scan,
             aiDurationMs: state.aiDurationMs,
             aiAttempted: state.aiAttempted,
+            aiLastAttemptAt: state.aiLastAttemptAt,
             aiBatchesOk: state.aiBatchesOk,
             aiBatchesTotal: state.aiBatchesTotal,
         };
@@ -462,6 +472,7 @@ function poolFromPersisted(p: PersistedPool): PoolState {
         scan: { ...p.scan, active_names: [...p.scan.active_names], loaded_names: [...p.scan.loaded_names] },
         aiDurationMs: p.aiDurationMs,
         aiAttempted: p.aiAttempted,
+        aiLastAttemptAt: p.aiLastAttemptAt ?? 0,
         aiBatchesOk: p.aiBatchesOk,
         aiBatchesTotal: p.aiBatchesTotal,
         rawEntries,
@@ -481,12 +492,13 @@ function loadPersistedPool(key: string): PoolState | null {
 }
 
 /**
- * AI 规则分池（v1.10.2）：让模型【逐条阅读】[mvu_update] 规则条目，输出每条规则
- * 管辖/关联的变量路径——散文式规则（正则抓不到 `_.set`）的路径映射由 AI 语义确定。
+ * AI 规则分池（v1.11.4）：让模型【分批完整阅读】[mvu_update] 规则条目，输出每条规则
+ * 管辖/关联的变量路径——规则→路径映射全部由 AI 语义确定，无正则提取。
  *
- * 现实依据：卡作者只写 [mvu_update] 标记，普通背景条目不写标记——AI 分池只瞄准
- * 规则条目（通常几条到几十条 = 1-3 批、几秒）；背景条目不 AI 分池
- * （绿灯 keys + 文本兜底足够，AI 语义归属对 ≤3 条辅助背景的收益不抵成本）。
+ * 读取策略（对齐用户「一次读不完就慢慢读，分批次读」）：
+ *   - 规则内容【完整】交给 AI（不截断 800；仅超过单条上限 8000 才截断，对齐原版条目上限）
+ *   - 按【总字符预算】自适应分批：每批总字符 ≤ AI_CLASSIFY_BATCH_CHARS（默认 24000 ≈ 12k token），
+ *     规则多/长时自动拆多批慢慢读
  *
  * 下标约定：entries 必须是【已过滤】的可用条目（enabled !== false 且 content 非空），
  * AI 输出序号 = 该数组下标（buildWorldbookPool 内部经 indexMap 映射，防错位）。
@@ -494,6 +506,10 @@ function loadPersistedPool(key: string): PoolState | null {
  * @returns { byIndex, batchesOk, batchesTotal, durationMs }；全批失败返回 null
  */
 const AI_CLASSIFY_BATCH = 15;
+/** 每批总字符预算（约 12k token；超出自动拆下一批慢慢读） */
+const AI_CLASSIFY_BATCH_CHARS = 24_000;
+/** 单条规则内容上限（对齐原版条目上限；超长才截断，其余完整读取） */
+const AI_CLASSIFY_ENTRY_MAX = 8_000;
 
 async function aiClassifyEntries(
     entries: any[]
@@ -508,23 +524,47 @@ async function aiClassifyEntries(
     }
     if (targetIndexes.length === 0) return null;
 
+    // 自适应分批：按条数与总字符预算双上限（一次读不完就慢慢读）
+    const batches: number[][] = [];
+    let current: number[] = [];
+    let current_chars = 0;
+    for (const idx of targetIndexes) {
+        const entry_chars =
+            String(entries[idx].name ?? '').length + String(entries[idx].content ?? '').length;
+        if (
+            current.length > 0 &&
+            (current.length >= AI_CLASSIFY_BATCH || current_chars + entry_chars > AI_CLASSIFY_BATCH_CHARS)
+        ) {
+            batches.push(current);
+            current = [];
+            current_chars = 0;
+        }
+        current.push(idx);
+        current_chars += entry_chars;
+    }
+    if (current.length > 0) batches.push(current);
+
     const started = Date.now();
     const byIndex: AiByIndex = new Map();
     let batchesOk = 0;
-    const batchesTotal = Math.ceil(targetIndexes.length / AI_CLASSIFY_BATCH);
+    const batchesTotal = batches.length;
 
-    for (let b = 0; b < batchesTotal; b++) {
-        const batchIndexes = targetIndexes.slice(b * AI_CLASSIFY_BATCH, (b + 1) * AI_CLASSIFY_BATCH);
+    for (let b = 0; b < batches.length; b++) {
+        const batchIndexes = batches[b];
         const lines = batchIndexes
-            .map(
-                idx =>
-                    `[${idx}] name=${String(entries[idx].name ?? '')} content=${String(entries[idx].content ?? '').slice(0, 800)}`
-            )
-            .join('\n');
+            .map(idx => {
+                const name = String(entries[idx].name ?? '');
+                let content = String(entries[idx].content ?? '');
+                if (content.length > AI_CLASSIFY_ENTRY_MAX) {
+                    content = content.slice(0, AI_CLASSIFY_ENTRY_MAX) + '…（超长已截断）';
+                }
+                return `[${idx}] name=${name}\n${content}`;
+            })
+            .join('\n\n');
         const task = [
             '<must>',
             `以下是变量更新规则条目清单（第 ${b + 1}/${batchesTotal} 批，共 ${batchIndexes.length} 条）。`,
-            '请【逐条阅读】每条规则，确定它管辖/关联的变量路径（相对于 stat_data，如 主角.境界）。',
+            '请【完整阅读】每条规则，确定它管辖/关联的变量路径（相对于 stat_data，如 主角.境界）。',
             '输出 JSON 数组，元素与规则一一对应：',
             '[{"idx":0,"paths":["主角.境界"],"topic":"境界突破"},',
             ' {"idx":1,"paths":[],"topic":""}]',
@@ -539,7 +579,7 @@ async function aiClassifyEntries(
             lines,
         ].join('\n');
         try {
-            const config = buildDecideRawConfig({ task, max_tokens: 1500 });
+            const config = buildDecideRawConfig({ task, max_tokens: 2000 });
             const text = normalizeGenerateText(await generateRaw(config));
             const parsed = parseAiClassification(text, batchIndexes.length);
             if (parsed) {
@@ -558,16 +598,17 @@ async function aiClassifyEntries(
     return { byIndex, batchesOk, batchesTotal, durationMs: Date.now() - started };
 }
 
-/** AI 规则分池：让模型逐条阅读规则条目，重建池（合并规则路径精确层） */
+/** AI 规则分池：让模型分批完整阅读规则条目，重建池（合并规则路径精确层） */
 async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
     if (state.pool.entries.length === 0) {
-        return { ...state, aiAttempted: true };
+        return { ...state, aiAttempted: true, aiLastAttemptAt: Date.now() };
     }
     const result = await aiClassifyEntries(state.rawEntries);
     if (!result) {
         return {
             ...state,
             aiAttempted: true,
+            aiLastAttemptAt: Date.now(),
             aiBatchesOk: 0,
             aiBatchesTotal: Math.ceil(state.rawEntries.length / AI_CLASSIFY_BATCH),
         };
@@ -578,6 +619,7 @@ async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
         pool,
         aiDurationMs: result.durationMs,
         aiAttempted: true,
+        aiLastAttemptAt: Date.now(),
         aiBatchesOk: result.batchesOk,
         aiBatchesTotal: result.batchesTotal,
     };
@@ -640,6 +682,7 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             },
             aiDurationMs: 0,
             aiAttempted: true,
+            aiLastAttemptAt: 0,
             aiBatchesOk: 0,
             aiBatchesTotal: 0,
             rawEntries: [],
@@ -652,13 +695,15 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
         pool_state.key === key &&
         Date.now() - pool_state.builtAt < POOL_TTL_MS;
 
-    // 0. 内存池已新鲜：仅当 Agent 已启用且 AI 规则分池未做过时补做（如预热时 Agent 未开）
+    // AI 分池需要补做的判定：未合并 && Agent 启用 &&（未尝试过 || 距上次尝试超重试间隔）
+    const should_retry_ai = (s: PoolState) =>
+        !s.pool.aiMerged &&
+        loadInnovationSettings(localStorage).agentEnabled &&
+        (!s.aiAttempted || Date.now() - s.aiLastAttemptAt > AI_RETRY_MS);
+
+    // 0. 内存池已新鲜：仅当 AI 规则分池需要补做时执行（如预热时 Agent 未开/失败后到重试窗口）
     if (!force && fresh) {
-        if (
-            pool_state.pool.aiMerged ||
-            pool_state.aiAttempted ||
-            !loadInnovationSettings(localStorage).agentEnabled
-        ) {
+        if (!should_retry_ai(pool_state)) {
             return pool_state;
         }
         pool_loading = true;
@@ -677,12 +722,8 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
         const persisted = loadPersistedPool(key);
         if (persisted) {
             pool_state = persisted;
-            // Agent 已启用且持久化池未深化 → 补做 AI 规则分池（rawEntries 已还原）
-            if (
-                !persisted.pool.aiMerged &&
-                !persisted.aiAttempted &&
-                loadInnovationSettings(localStorage).agentEnabled
-            ) {
+            // AI 规则分池需要补做 → 补做（rawEntries 已还原；失败后到重试窗口自动再试）
+            if (should_retry_ai(persisted)) {
                 pool_loading = true;
                 try {
                     const classified = await classifyPoolWithAi(persisted);
@@ -741,6 +782,7 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             },
             aiDurationMs: 0,
             aiAttempted: false,
+            aiLastAttemptAt: 0,
             aiBatchesOk: 0,
             aiBatchesTotal: Math.ceil(usable_entries.length / AI_CLASSIFY_BATCH),
             rawEntries: usable_entries,
@@ -934,6 +976,7 @@ export async function runAgentWorkflowForMessage(
                 rules: state.pool.rules.length,
                 strategy: { ...state.pool.strategyCount },
                 aiMerged: state.pool.aiMerged,
+                aiAttempted: state.aiAttempted,
                 aiDurationMs: state.aiDurationMs,
                 aiBatchesOk: state.aiBatchesOk,
                 aiBatchesTotal: state.aiBatchesTotal,

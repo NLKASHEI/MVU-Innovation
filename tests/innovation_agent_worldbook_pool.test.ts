@@ -45,14 +45,14 @@ describe('buildWorldbookPool（初始化分类 + 索引）', () => {
         expect(pool.entries[1].keys).toEqual(['好感度']);
     });
 
-    test('rulePaths 精确索引：规则显式声明的路径', () => {
+    test('无 AI 分池时 rulePaths 为空（v1.11.4 无正则提取）', () => {
         const pool = buildWorldbookPool([
             rule_entry("[mvu_update] _.set('主角.境界', 1); 每当 主角.道心 降低时"),
         ]);
-        expect(pool.rulePaths).toContain('主角.境界');
-        expect(pool.rulePaths).toContain('主角.道心');
-        expect(pool.rulePathToRules.get('主角.境界')?.[0]).toContain('主角.境界');
-        expect(pool.rulePathToRules.size).toBe(2);
+        // 正则已彻底删除：规则→路径只来自 AI 分池（aiByIndex）
+        expect(pool.rulePaths).toEqual([]);
+        expect(pool.rulePathToRules.size).toBe(0);
+        expect(pool.aiMerged).toBe(false);
     });
 
     test('AI 规则分池：规则条目路径并入精确层，背景条目 AI 路径被忽略（v1.10.2）', () => {
@@ -89,11 +89,14 @@ describe('buildWorldbookPool（初始化分类 + 索引）', () => {
         expect(pool.rulePaths).toEqual(['主角.境界']);
     });
 
-    test('indexStats 统计索引规模', () => {
-        const pool = buildWorldbookPool([
+    test('indexStats 统计索引规模（AI 分池后）', () => {
+        const entries = [
             rule_entry("[mvu_update] _.set('a.b', 1); _.set('a.c', 2);"),
             background_entry('绿', 'x', { type: 'selective', keys: ['k1', 'k2'] }),
-        ]);
+        ];
+        const pool = buildWorldbookPool(entries, {
+            aiByIndex: new Map([[0, ['a.b', 'a.c']]]),
+        });
         expect(pool.indexStats).toEqual({ rulePaths: 2, rulePathToRules: 2 });
     });
 
@@ -154,11 +157,14 @@ describe('parseAiClassification（AI 逐条分池输出解析）', () => {
 });
 
 describe('poolQueryRulesByPaths（精确层 + 文本兜底）', () => {
-    test('精确层：决策路径命中规则显式声明 → 必中（正文写法无关）', () => {
-        const pool = buildWorldbookPool([
-            rule_entry("[mvu_update] _.set('理.好感度', 0); // 每天更新"),
-            rule_entry('[mvu_update] 世界.时间 规则'),
-        ]);
+    test('精确层：决策路径命中 AI 给出的管辖路径 → 必中（正文写法无关）', () => {
+        const pool = buildWorldbookPool(
+            [
+                rule_entry("[mvu_update] _.set('理.好感度', 0); // 每天更新"),
+                rule_entry('[mvu_update] 世界.时间 规则'),
+            ],
+            { aiByIndex: new Map([[0, ['理.好感度']]]) }
+        );
         const rules = poolQueryRulesByPaths(pool, ['理.好感度']);
         expect(rules).toEqual(["[mvu_update] _.set('理.好感度', 0); // 每天更新"]);
     });
@@ -172,7 +178,7 @@ describe('poolQueryRulesByPaths（精确层 + 文本兜底）', () => {
         expect(rules).toEqual(['[mvu_update] 每当主角境界提升时，同步更新修为']);
     });
 
-    test('文本兜底：未显式声明的散文规则按内容段匹配补漏', () => {
+    test('文本兜底：AI 分池未覆盖时按内容段匹配补漏', () => {
         const pool = buildWorldbookPool([
             rule_entry('[mvu_update] 每当主角境界提升时，同步更新修为'),
         ]);
@@ -181,9 +187,10 @@ describe('poolQueryRulesByPaths（精确层 + 文本兜底）', () => {
     });
 
     test('精确层与兜底层结果去重', () => {
-        const pool = buildWorldbookPool([
-            rule_entry("[mvu_update] _.set('a.b', 1); a.b 规则正文"),
-        ]);
+        const pool = buildWorldbookPool(
+            [rule_entry("[mvu_update] _.set('a.b', 1); a.b 规则正文")],
+            { aiByIndex: new Map([[0, ['a.b']]]) }
+        );
         expect(poolQueryRulesByPaths(pool, ['a.b'])).toHaveLength(1);
     });
 
