@@ -145,6 +145,18 @@ export const buttons: Button[] = [
     {
         name: '重新处理变量',
         function: async () => {
+            // [革新版接管] agentEnabled 时：革新版直接写楼层变量（消息里无 <UpdateVariable> 块），
+            // 原逻辑 unset stat_data + 解析消息块会【清空变量】——改为重跑革新版完整工作流
+            if (loadInnovationSettings(localStorage).agentEnabled) {
+                const result = await retryLastAgentWorkflow();
+                if (result) {
+                    toastr.info(
+                        `已重新处理（${result.termination}，阶段 ${result.stages.join('→')}）`,
+                        '[革新版·Agent]重新处理变量'
+                    );
+                }
+                return;
+            }
             const last_msg = getLastMessageId();
             if (last_msg < 1) return;
             if (SillyTavern.chat.length === 0) return;

@@ -1081,6 +1081,14 @@ async function applyPreparedOps(prepared: PreparedOps): Promise<{ applied: boole
         await replaceVariables(variables, { type: 'chat' });
     }
     await replaceVariables(variables, { type: 'message', message_id });
+    // 触发消息重渲染（状态栏 StatusPlaceHolderImpl 等组件刷新）——
+    // 革新版直接写楼层变量、不改消息文本，必须显式 refresh:'affected'，
+    // 否则 ST 不重渲染该消息，状态栏/面板反应不过来（v2.0.3 修复）
+    try {
+        await setChatMessages([{ message_id }], { refresh: 'affected' });
+    } catch {
+        /* 刷新失败不影响变量已写入 */
+    }
     return { applied: has_variable_modified };
 }
 
