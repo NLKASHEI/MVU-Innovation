@@ -10,8 +10,8 @@
  * 因此用 @<tag> 的 URL 绝不会拿到旧版本——这是相对 @main（分支缓存最长 12h）的根治方案。
  */
 
-/** 当前版本号（与 git tag 保持一致） */
-export const INNOVATION_VERSION = 'v1.12.12';
+/** 当前版本号（与 git tag 保持一致；单位数语义：2.0.0 起） */
+export const INNOVATION_VERSION = '2.0.0';
 
 /** 发布仓库（GitHub 完整路径） */
 export const INNOVATION_REPO = 'NLKASHEI/MVU-Innovation';

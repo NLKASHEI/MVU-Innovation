@@ -35,8 +35,8 @@ describe('innovation version helpers', () => {
         expect(buildCdnUrl('  ')).toBe('');
     });
 
-    test('当前内置版本号非空且形如 v1.x.y', () => {
-        expect(INNOVATION_VERSION).toMatch(/^v\d+\.\d+\.\d+$/);
+    test('当前内置版本号非空且形如 X.Y.Z（单位数语义，2.0.0 起无 v 前缀）', () => {
+        expect(INNOVATION_VERSION).toMatch(/^v?\d+\.\d+\.\d+$/);
     });
 });
 
