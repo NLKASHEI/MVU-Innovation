@@ -89,37 +89,25 @@
                         背景 {{ poolState.entries - poolState.rules }} ·
                         灯效 蓝{{ poolState.strategy.constant }} / 绿{{ poolState.strategy.selective }} /
                         向量{{ poolState.strategy.vectorized }}）·
-                        索引 规则路径{{ poolState.indexStats.rulePaths }} /
-                        精确映射{{ poolState.indexStats.rulePathToRules }} ·
                         ZOD 仓库
                         {{
                             poolState.zodScripts.length > 0
                                 ? `「${poolState.zodScripts.join('、')}」${poolState.zodPathCount} 路径`
                                 : '未发现'
                         }} ·
-                    AI 规则分池
-                    {{
-                        poolState.aiMerged
-                            ? `已合并（${poolState.aiBatchesOk}/${poolState.aiBatchesTotal} 批，${poolState.aiDurationMs}ms）`
-                            : poolState.aiAttempted
-                              ? `尝试过（失败）`
-                              : '未触发（开启 Agent 后自动补做）'
-                    }}
-                    <span v-if="poolState.aiError" class="nlkaleido-warn">
-                        ｜{{ poolState.aiError }}
-                    </span>
-                </p>
-                <p v-else class="nlkaleido-tip">
-                    缓存池尚未加载（进入卡或手动加载后自动预热）。
-                </p>
-                <button class="menu_button" :disabled="poolLoading" @click="onLoadPool">
-                    {{ poolLoading ? '加载中…' : '手动加载缓存池' }}
-                </button>
-                <p class="nlkaleido-tip">
-                    进入卡时自动做 AI 规则分池（模型逐条阅读 [mvu_update] 规则条目，通常几秒）；
-                    手动按钮强制重建池并重新分池。
-                </p>
-            </Detail>
+                        规则全文直喂决策（v2.0.8 通用化，无 AI 分池）
+                    </p>
+                    <p v-else class="nlkaleido-tip">
+                        缓存池尚未加载（进入卡或手动加载后自动预热）。
+                    </p>
+                    <button class="menu_button" :disabled="poolLoading" @click="onLoadPool">
+                        {{ poolLoading ? '加载中…' : '手动加载缓存池' }}
+                    </button>
+                    <p class="nlkaleido-tip">
+                        进入卡时自动建池（本地分类 + ZOD 变量仓库扫描，零模型调用）；
+                        手动按钮强制重建池。
+                    </p>
+                </Detail>
 
             <Detail title="工作流调试日志（最近 50 次运行）">
                 <div class="nlkaleido-debug-list">
@@ -196,26 +184,13 @@
                                 （规则 {{ entry.pool.rules }} ·
                                 灯效 蓝{{ entry.pool.strategy.constant }} / 绿{{ entry.pool.strategy.selective }} /
                                 向量{{ entry.pool.strategy.vectorized }}）·
-                                索引 规则路径{{ entry.pool.indexStats.rulePaths }} /
-                                精确映射{{ entry.pool.indexStats.rulePathToRules }} ·
                                 ZOD 仓库
                                 {{
                                     entry.pool.zodScripts.length > 0
                                         ? `「${entry.pool.zodScripts.join('、')}」${entry.pool.zodPathCount} 路径`
                                         : '未发现'
                                 }} ·
-                                AI 规则分池
-                                {{
-                                    entry.pool.aiMerged
-                                        ? '已合并'
-                                        : entry.pool.aiAttempted
-                                          ? '尝试过（失败）'
-                                          : '未触发'
-                                }}
-                                <span v-if="entry.pool.aiBatchesTotal > 0">
-                                    （{{ entry.pool.aiBatchesOk }}/{{ entry.pool.aiBatchesTotal }} 批，
-                                    {{ entry.pool.aiDurationMs }}ms）
-                                </span>
+                                规则全文直喂决策
                             </p>
                             <p v-if="entry.due && entry.due.length" class="nlkaleido-debug-line">
                                 <b>due 候选</b>：{{ entry.due.join('、') }}
@@ -381,12 +356,12 @@ const innovationCacheRateText = computed(() => {
 async function onLoadPool() {
     poolLoading.value = true;
     try {
-        const state = await loadWorldbookPoolNow(true);
-        poolState.value = getWorldbookPoolState();
-        // 手动加载后 AI 分池失败 → 明确提示原因（规则路径会为 0，候选只剩剧情命中）
-        if (state && state.pool && !state.pool.aiMerged && state.aiError) {
-            toastr.error(
-                `AI 规则分池失败：${state.aiError}（规则路径将为 0，候选只剩剧情命中）`,
+        await loadWorldbookPoolNow(true);
+        // 成功反馈（v2.0.9：手动加载必须有明确响应，不再静默）
+        const state = getWorldbookPoolState();
+        if (state) {
+            toastr.success(
+                `缓存池已重建：入池 ${state.entries} 条目 · ZOD 仓库 ${state.zodPathCount} 路径`,
                 '[革新版·Agent]手动加载缓存池'
             );
         }
