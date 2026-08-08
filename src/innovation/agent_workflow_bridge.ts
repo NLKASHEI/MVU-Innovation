@@ -56,7 +56,8 @@ import {
     WorldbookPool,
 } from '@/innovation/agent_worldbook_pool';
 import { updateVariables } from '@/function/update_variables';
-import { getLastValidVariable } from '@/util';
+import { MVU_TOOL_DEFINITION } from '@/function/function_call';
+import { getLastValidVariable, normalizeBaseURL } from '@/util';
 import { loadInnovationSettings } from '@/innovation/settings';
 import { useDataStore } from '@/store';
 
@@ -65,6 +66,39 @@ let last_workflow_result: AgentWorkflowResult | null = null;
 
 /** 跨轮上下文：上一轮更新摘要（喂回下一轮 decide/update 任务，解决「不看前一层输入」） */
 let last_round_summary: string | null = null;
+
+/**
+ * 实时组装额外模型 API 配置（每次调用读取，切换配置立即生效）：
+ * 复用原版 MVU「额外模型解析配置」——模型来源=自定义 时用独立 API（地址/密钥/模型/温度等），
+ * 否则回退主插头（custom_api 不传）。修复 v1.12.8 前 custom_api 硬编码 undefined 的 bug。
+ */
+function buildExtraCustomApi(): Record<string, any> | undefined {
+    try {
+        const cfg = useDataStore().settings.额外模型解析配置;
+        if (!cfg || cfg.模型来源 !== '自定义') return undefined;
+        const unset_if_equal = (value: number, expected: number) =>
+            value === expected ? 'unset' : value;
+        return {
+            apiurl: normalizeBaseURL(String(cfg.api地址 ?? '')),
+            key: cfg.密钥,
+            model: cfg.模型名称,
+            max_tokens: cfg.最大回复token数,
+            temperature: unset_if_equal(cfg.温度 ?? 1, 1),
+            frequency_penalty: unset_if_equal(cfg.频率惩罚 ?? 0, 0),
+            presence_penalty: unset_if_equal(cfg.存在惩罚 ?? 0, 0),
+            top_p: unset_if_equal(cfg.top_p ?? 1, 1),
+            top_k: unset_if_equal(cfg.top_k ?? 0, 0),
+        };
+    } catch {
+        return undefined;
+    }
+}
+
+/** 当前 API 来源描述（面板显示）：自定义（模型名）/ 与插头相同 */
+function getCurrentApiSource(): string {
+    const api = buildExtraCustomApi();
+    return api ? `自定义 ${api.model ?? '未知模型'}` : '与插头相同';
+}
 
 /** 革新版自身模型调用的缓存命中统计（decide/update 的 usage，与面板原版统计分离） */
 let innovation_cache: CacheMetricsState = createCacheMetricsState();
@@ -193,6 +227,8 @@ export interface WorkflowDebugEntry {
     applied: boolean;
     /** 本轮搜索到的背景条目数（按相关性打分，不固定 3 条） */
     loreCount: number;
+    /** 本轮模型调用 API 来源（自定义 模型名 / 与插头相同） */
+    apiSource: string;
 }
 
 const DEBUG_LOG_MAX = 50;
@@ -649,16 +685,19 @@ async function aiClassifyEntries(
         ].join('\n');
         try {
             // 首选结构化输出（json_schema，解析成功率大增）；provider 不支持时降级纯文本
+            // API 来源跟随原版「额外模型解析配置」（模型来源=自定义时用独立 API）
+            const custom_api = buildExtraCustomApi();
             let text = '';
             try {
                 const config = buildDecideRawConfig({
                     task,
+                    custom_api,
                     max_tokens: 2000,
                     json_schema: createAiClassifySchema(),
                 });
                 text = normalizeGenerateText(await generateRaw(config));
             } catch {
-                const fallback_config = buildDecideRawConfig({ task, max_tokens: 2000 });
+                const fallback_config = buildDecideRawConfig({ task, custom_api, max_tokens: 2000 });
                 text = normalizeGenerateText(await generateRaw(fallback_config));
             }
             const parsed = parseAiClassification(text, batchIndexes.length);
@@ -1069,8 +1108,8 @@ export async function runAgentWorkflowForMessage(
     }
 
     const story = extractRecentStory(message_id);
-    // 自定义额外模型配置（可选；缺省用当前插头）
-    const custom_api: Record<string, any> | undefined = undefined;
+    // 额外模型 API 配置：每次调用实时读取原版「额外模型解析配置」
+    // （模型来源=自定义 → 独立 API；否则主插头）——切换配置立即生效（v1.12.9 修复）
     // 多轮对话上下文：第一轮（决策）消息序列 + 决策输出——第二轮（更新）在同一对话里续
     let round_messages: ChatMessage[] = [];
     let decide_output: string | null = null;
@@ -1094,6 +1133,7 @@ export async function runAgentWorkflowForMessage(
         validation_errors: [],
         applied: false,
         loreCount: 0,
+        apiSource: '',
     };
     const workflow_started = Date.now();
 
@@ -1135,6 +1175,8 @@ export async function runAgentWorkflowForMessage(
             last_error?: string
         ) => {
             const call_started = Date.now();
+            const custom_api = buildExtraCustomApi();
+            entry.apiSource = getCurrentApiSource();
             round_messages = buildDecideMessages({
                 story: input.story,
                 candidates: input.candidates,
@@ -1196,6 +1238,11 @@ export async function runAgentWorkflowForMessage(
                 /* toastr 不可用时忽略 */
             }
             const call_started = Date.now();
+            const custom_api = buildExtraCustomApi();
+            // 跟随原版「额外模型解析配置.应答格式」：工具调用 → tools+tool_choice required；
+            // 格式化输出/V4 → json_schema（ST 自动转换：OpenAI → response_format，Claude → 强制工具）
+            const response_format = useDataStore().settings.额外模型解析配置.应答格式;
+            const use_tool_call = response_format === '工具调用';
             let structured = true;
             let result: unknown;
             let messages: ChatMessage[] = [];
@@ -1213,12 +1260,17 @@ export async function runAgentWorkflowForMessage(
                 const config = buildMessagesRawConfig({
                     messages,
                     custom_api,
-                    json_schema: createJsonPatchResponseSchema(),
                     max_tokens: UPDATE_MAX_TOKENS,
                 });
+                if (use_tool_call) {
+                    config.tools = [MVU_TOOL_DEFINITION];
+                    config.tool_choice = 'required';
+                } else {
+                    config.json_schema = createJsonPatchResponseSchema();
+                }
                 result = await generateRaw(config);
             } catch {
-                // 降级：同消息去 json_schema（模型输出 <UpdateVariable> 块）
+                // 降级：同消息去掉 tools/json_schema（模型输出 <UpdateVariable> 块）
                 structured = false;
                 messages = buildUpdateMessages({
                     prev: round_messages,

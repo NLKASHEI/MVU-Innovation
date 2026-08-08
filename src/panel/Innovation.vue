@@ -140,6 +140,9 @@
                             </span>
                             <span class="nlkaleido-debug-dur">{{ entry.duration_ms }}ms</span>
                             <span class="nlkaleido-debug-stages">{{ entry.stages.join('→') }}</span>
+                            <span v-if="entry.apiSource" class="nlkaleido-debug-line">
+                                API {{ entry.apiSource }}
+                            </span>
                         </button>
                         <div v-if="expanded[entry.id]" class="nlkaleido-debug-body">
                             <p v-if="entry.candidates" class="nlkaleido-debug-line">
