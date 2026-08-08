@@ -515,8 +515,8 @@ function poolFromPersisted(p: PersistedPool): PoolState {
         aiLastAttemptAt: p.aiLastAttemptAt ?? 0,
         aiBatchesOk: p.aiBatchesOk,
         aiBatchesTotal: p.aiBatchesTotal,
-        // ZOD 变量仓库：持久化缺失时重新扫描脚本（脚本变化也能跟上）
-        zodPaths: p.zodPaths ?? scanZodScripts().paths,
+        // ZOD 变量仓库：持久化缺失时留空，由 ensureWorldbookPool 读回后异步补扫（脚本变化也能跟上）
+        zodPaths: p.zodPaths ?? [],
         zodScripts: p.zodScripts ?? [],
         rawEntries,
     };
@@ -691,11 +691,10 @@ async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
 }
 
 /** 扫描角色卡 TH 脚本，识别 ZOD 变量仓库脚本并解析出变量路径树（作者声明的权威变量仓库） */
-function scanZodScripts(): { scriptNames: string[]; paths: string[] } {
+async function scanZodScripts(): Promise<{ scriptNames: string[]; paths: string[] }> {
     const scriptNames: string[] = [];
     const paths: string[] = [];
     try {
-        const trees: any[] = getScriptTrees({ type: 'character' });
         const visit = (node: any) => {
             if (!node) return;
             if (node.type === 'script' && typeof node.content === 'string') {
@@ -709,9 +708,14 @@ function scanZodScripts(): { scriptNames: string[]; paths: string[] } {
                 node.scripts.forEach(visit);
             }
         };
-        trees.forEach(visit);
-    } catch {
-        /* 脚本 API 不可用时忽略 */
+        // 兼容同步/异步返回 + 多类型（ZOD 脚本可能在角色卡/全局/预设脚本树里）
+        for (const type of ['character', 'global', 'preset'] as const) {
+            const raw: any = getScriptTrees({ type });
+            const trees: any[] = Array.isArray(raw) ? raw : ((await raw) as any[]) ?? [];
+            trees.forEach(visit);
+        }
+    } catch (e) {
+        console.warn('[革新版·Agent] ZOD 脚本扫描失败', e);
     }
     return { scriptNames, paths };
 }
@@ -814,6 +818,12 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
     if (!force) {
         const persisted = loadPersistedPool(key);
         if (persisted) {
+            // ZOD 变量仓库缺失（旧池/首次）→ 异步补扫脚本
+            if ((persisted.zodScripts ?? []).length === 0) {
+                const zod = await scanZodScripts();
+                persisted.zodPaths = zod.paths;
+                persisted.zodScripts = zod.scriptNames;
+            }
             pool_state = persisted;
             // AI 规则分池需要补做 → 补做（rawEntries 已还原；失败后到重试窗口自动再试）
             if (should_retry_ai(persisted)) {
@@ -859,8 +869,8 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
 
         // 本地分类建池（规则/剧情/其他 + 灯效状态 + 正则索引）
         const pool = buildWorldbookPool(usable_entries);
-        // ZOD 变量仓库：扫描角色卡 TH 脚本，解析作者声明的变量路径（辅助候选，AI 分池失败时兜底）
-        const zod = scanZodScripts();
+        // ZOD 变量仓库：扫描角色卡/全局/预设 TH 脚本，解析作者声明的变量路径（辅助候选，AI 分池失败时兜底）
+        const zod = await scanZodScripts();
         let state: PoolState = {
             key,
             builtAt: Date.now(),
