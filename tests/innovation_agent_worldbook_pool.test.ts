@@ -73,7 +73,7 @@ describe('buildWorldbookPool（初始化分类 + 索引）', () => {
         expect(pool.aiMerged).toBe(true);
     });
 
-    test('强制更新（mandatory）：规则标 MANDATORY/必须/每轮 → 其管辖路径进 mandatoryPaths（通用机制）', () => {
+    test('强制更新（mandatory 细粒度）：只标 AI 明确标记的路径，不整条规则全标（v1.12.1 修复）', () => {
         const entries = [
             rule_entry('[mvu_update] 11.BEAUTY RANKING: MANDATORY — 绝色榜轮换'),
             rule_entry('[mvu_update] 每轮刷新 世界.当前时间'),
@@ -84,13 +84,14 @@ describe('buildWorldbookPool（初始化分类 + 索引）', () => {
             [1, ['世界.当前时间']],
             [2, ['主角.修为']],
         ]);
-        const pool = buildWorldbookPool(entries, { aiByIndex });
-        // MANDATORY 规则的全部管辖路径强制
-        expect(pool.mandatoryPaths).toContain('世界.绝色榜');
-        expect(pool.mandatoryPaths).toContain('绝色.仙姿');
-        // 「每轮」规则也强制
-        expect(pool.mandatoryPaths).toContain('世界.当前时间');
-        // 普通规则不强制
+        // 规则 0 内容虽含 MANDATORY，但 AI 只标记「世界.绝色榜」强制（绝色.仙姿 不标）
+        const aiMandatoryByIndex = new Map([[0, ['世界.绝色榜']]]);
+        const pool = buildWorldbookPool(entries, { aiByIndex, aiMandatoryByIndex });
+        expect(pool.mandatoryPaths).toEqual(['世界.绝色榜']);
+        // 未被 AI 标记的路径即使规则含 MANDATORY 也不强制（此前会整条规则全标）
+        expect(pool.mandatoryPaths).not.toContain('绝色.仙姿');
+        // 无 AI 强制标记 → 不强制（「每轮」规则若 AI 没标也不强制）
+        expect(pool.mandatoryPaths).not.toContain('世界.当前时间');
         expect(pool.mandatoryPaths).not.toContain('主角.修为');
     });
 
@@ -137,43 +138,53 @@ describe('buildWorldbookPool（初始化分类 + 索引）', () => {
 
 describe('parseAiClassification（AI 逐条分池输出解析）', () => {
     test('标准数组（显式 idx）', () => {
-        const map = parseAiClassification(
+        const r = parseAiClassification(
             '[{"idx":0,"paths":["主角.境界"],"topic":"a"},{"idx":1,"paths":[],"topic":""}]',
             2
         );
-        expect(map?.get(0)).toEqual(['主角.境界']);
-        expect(map?.get(1)).toEqual([]);
+        expect(r?.paths.get(0)).toEqual(['主角.境界']);
+        expect(r?.paths.get(1)).toEqual([]);
+        expect(r?.mandatory.size).toBe(0);
+    });
+
+    test('mandatory 细粒度字段解析（v1.12.1）', () => {
+        const r = parseAiClassification(
+            '[{"idx":0,"paths":["世界.绝色榜","绝色.仙姿"],"mandatory":["世界.绝色榜"]}]',
+            1
+        );
+        expect(r?.paths.get(0)).toEqual(['世界.绝色榜', '绝色.仙姿']);
+        expect(r?.mandatory.get(0)).toEqual(['世界.绝色榜']);
     });
 
     test('缺省 idx 按顺序对齐', () => {
-        const map = parseAiClassification('[{"paths":["a.b"]},{"paths":[]}]', 2);
-        expect(map?.get(0)).toEqual(['a.b']);
-        expect(map?.get(1)).toEqual([]);
+        const r = parseAiClassification('[{"paths":["a.b"]},{"paths":[]}]', 2);
+        expect(r?.paths.get(0)).toEqual(['a.b']);
+        expect(r?.paths.get(1)).toEqual([]);
     });
 
     test('对象形式 {"0":[...]}', () => {
-        const map = parseAiClassification('{"1":["x.y"],"0":[]}', 2);
-        expect(map?.get(1)).toEqual(['x.y']);
-        expect(map?.get(0)).toEqual([]);
+        const r = parseAiClassification('{"1":["x.y"],"0":[]}', 2);
+        expect(r?.paths.get(1)).toEqual(['x.y']);
+        expect(r?.paths.get(0)).toEqual([]);
     });
 
     test('围栏/尾部逗号/单引号容错', () => {
-        const map = parseAiClassification("```json\n[{'idx':0,'paths':['a.b'],},]\n```", 1);
-        expect(map?.get(0)).toEqual(['a.b']);
+        const r = parseAiClassification("```json\n[{'idx':0,'paths':['a.b'],},]\n```", 1);
+        expect(r?.paths.get(0)).toEqual(['a.b']);
     });
 
     test('路径归一化与非法过滤', () => {
-        const map = parseAiClassification(
+        const r = parseAiClassification(
             '[{"idx":0,"paths":["stat_data.理.好感度","_.set","",123]}]',
             1
         );
-        expect(map?.get(0)).toEqual(['理.好感度']);
+        expect(r?.paths.get(0)).toEqual(['理.好感度']);
     });
 
     test('越界序号丢弃', () => {
-        const map = parseAiClassification('[{"idx":5,"paths":["a.b"]},{"idx":1,"paths":["c.d"]}]', 2);
-        expect(map?.size).toBe(1);
-        expect(map?.get(1)).toEqual(['c.d']);
+        const r = parseAiClassification('[{"idx":5,"paths":["a.b"]},{"idx":1,"paths":["c.d"]}]', 2);
+        expect(r?.paths.size).toBe(1);
+        expect(r?.paths.get(1)).toEqual(['c.d']);
     });
 
     test('非 JSON → null', () => {

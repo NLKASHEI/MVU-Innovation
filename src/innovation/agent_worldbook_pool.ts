@@ -55,7 +55,7 @@ export interface WorldbookPool {
     rulePaths: string[];
     /** 精确索引：AI 给出的规则管辖路径 → 管辖它的规则内容 */
     rulePathToRules: Map<string, string[]>;
-    /** 强制更新路径（规则内容含 MANDATORY/必须/每轮 等 → 其 AI 管辖路径；每轮必进候选） */
+    /** 强制更新路径（AI 分池细粒度标记：规则中明确标 MANDATORY/必须/每轮 的管辖路径；每轮必进候选） */
     mandatoryPaths: string[];
     /** 池内各策略计数 */
     strategyCount: { constant: number; selective: number; vectorized: number };
@@ -65,14 +65,18 @@ export interface WorldbookPool {
     indexStats: PoolIndexStats;
 }
 
-/** 强制更新标记（规则内容出现即视为该规则管辖的路径每轮必须更新） */
-const MANDATORY_RULE_RE = /MANDATORY|mandatory|必须|每轮|always|always update/i;
-
 /**
  * AI 规则分池结果：AI 逐条阅读规则后确定的「规则条目输入下标 → 管辖变量路径」。
  * 下标 = 传入 buildWorldbookPool 的 entries 数组下标（内部经 indexMap 映射，防错位）。
  */
 export type AiByIndex = Map<number, string[]>;
+
+/**
+ * AI 细粒度强制标记：AI 阅读规则时确定的「规则条目输入下标 → 该条规则中标注了
+ * MANDATORY/必须/每轮 的管辖路径」（v1.12.1 起——不再"规则含 MANDATORY 字样就
+ * 全部管辖路径强制"，否则规则模板里出现一次 MANDATORY 会误伤全部路径）。
+ */
+export type AiMandatoryByIndex = Map<number, string[]>;
 
 function strategyOf(entry: WorldbookEntryLike): PoolStrategy {
     const type = String(entry.strategy?.type ?? 'constant');
@@ -106,11 +110,16 @@ function normalizeAiPaths(value: unknown): string[] {
 
 /**
  * 解析 AI 逐条分池输出（JSON 数组或 {"序号": [...]} 对象，容忍围栏/尾部逗号/单引号）。
+ * 数组项支持 {idx, paths, mandatory}——mandatory 为规则中明确标注 MANDATORY/必须/每轮 的路径
+ * （v1.12.1 细粒度强制标记）。
  * @param raw 模型输出
  * @param count 本批条目数（序号必须在 [0, count) 内）
- * @returns 序号 → 路径清单；无法解析返回 null
+ * @returns { paths, mandatory } 两个 序号→路径清单 映射；无法解析返回 null
  */
-export function parseAiClassification(raw: string, count: number): Map<number, string[]> | null {
+export function parseAiClassification(
+    raw: string,
+    count: number
+): { paths: Map<number, string[]>; mandatory: Map<number, string[]> } | null {
     if (!raw) return null;
     let text = String(raw).trim();
     text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -137,7 +146,8 @@ export function parseAiClassification(raw: string, count: number): Map<number, s
         }
     }
 
-    const map = new Map<number, string[]>();
+    const paths = new Map<number, string[]>();
+    const mandatory = new Map<number, string[]>();
     if (Array.isArray(parsed)) {
         // 数组：优先用显式 idx，缺省按顺序对齐
         for (let i = 0; i < parsed.length && i < count; i++) {
@@ -146,18 +156,20 @@ export function parseAiClassification(raw: string, count: number): Map<number, s
             const rec = item as Record<string, unknown>;
             const idx = typeof rec.idx === 'number' ? rec.idx : i;
             if (!Number.isInteger(idx) || idx < 0 || idx >= count) continue;
-            map.set(idx, normalizeAiPaths(rec.paths));
+            paths.set(idx, normalizeAiPaths(rec.paths));
+            const m = normalizeAiPaths(rec.mandatory);
+            if (m.length > 0) mandatory.set(idx, m);
         }
     } else if (parsed && typeof parsed === 'object') {
         for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
             const idx = Number(key);
             if (!Number.isInteger(idx) || idx < 0 || idx >= count) continue;
-            map.set(idx, normalizeAiPaths(value));
+            paths.set(idx, normalizeAiPaths(value));
         }
     } else {
         return null;
     }
-    return map.size > 0 ? map : null;
+    return paths.size > 0 ? { paths, mandatory } : null;
 }
 
 /**
@@ -166,11 +178,12 @@ export function parseAiClassification(raw: string, count: number): Map<number, s
  * 按输入数组对齐——内部通过 indexMap 映射到池内下标，杜绝错位）。
  * @param entries 已加载的世界书条目（含禁用项，本函数跳过）
  * @param opts.aiByIndex AI 逐条分池结果（条目输入下标 → 关联路径）
+ * @param opts.aiMandatoryByIndex AI 细粒度强制标记（条目输入下标 → 规则中标注 MANDATORY/必须/每轮 的路径）
  * @param opts.extraRulePaths 兼容参数：AI 分类的规则路径（并入 rulePaths）
  */
 export function buildWorldbookPool(
     entries: WorldbookEntryLike[],
-    opts?: { aiByIndex?: AiByIndex; extraRulePaths?: string[] }
+    opts?: { aiByIndex?: AiByIndex; aiMandatoryByIndex?: AiMandatoryByIndex; extraRulePaths?: string[] }
 ): WorldbookPool {
     const pooled: PooledEntry[] = [];
     /** 输入下标 → 池内下标（禁用/空条目无映射） */
@@ -216,7 +229,8 @@ export function buildWorldbookPool(
         const list = rulePathToRules.get(normalized) ?? [];
         if (!list.includes(ruleContent)) list.push(ruleContent);
         rulePathToRules.set(normalized, list);
-        // 强制更新（通用机制）：规则内容标了 MANDATORY/必须/每轮 等 → 该规则管辖的路径每轮必进候选
+        // 强制更新（v1.12.1 细粒度）：仅 AI 明确标记的路径进 mandatoryPaths，
+        // 不再"规则含 MANDATORY 字样 → 该规则全部管辖路径强制"
         if (mandatory && !mandatoryPaths.includes(normalized)) mandatoryPaths.push(normalized);
     };
     const aiByIndex = opts?.aiByIndex;
@@ -226,9 +240,9 @@ export function buildWorldbookPool(
             if (pooled_idx === undefined) continue;
             const entry = pooled[pooled_idx];
             if (!entry || entry.marker !== 'rule') continue;
-            const mandatory = MANDATORY_RULE_RE.test(entry.content);
+            const ai_mandatory = opts?.aiMandatoryByIndex?.get(input_idx) ?? [];
             for (const path of paths) {
-                addRulePath(path, entry.content, mandatory);
+                addRulePath(path, entry.content, ai_mandatory.includes(normalizePath(path)));
             }
         }
     }

@@ -361,12 +361,15 @@ export function parseDecidePaths(raw: string, allowed?: string[]): string[] {
         paths.push(normalized);
     };
     for (const line of raw.split(/\r?\n/)) {
-        const trimmed = line.trim();
+        let trimmed = line.trim();
         if (!trimmed) continue;
         // 整行「无更新」声明 → 清空并短路（防止把 none 当路径）
         if (DECIDE_NONE_RE.test(trimmed) || DECIDE_NONE_RE.test(trimmed.replace(/^[-*•]\s*/, ''))) {
             return [];
         }
+        // 剥离列表前缀（模型常模仿候选清单格式输出 `- 路径: Y`，v1.12.1 修复：
+        // 此前 judge 分支未剥离前缀导致全部路径被 allowed 过滤丢弃）
+        trimmed = trimmed.replace(/^[-*•]\s*/, '');
         // `路径: Y` / `路径 : Y` / `路径：Y`
         const judge = trimmed.match(/^(.+?)\s*[:：]\s*(Y|N|YES|NO|y|n|是|否)\s*$/i);
         if (judge) {
@@ -378,7 +381,7 @@ export function parseDecidePaths(raw: string, allowed?: string[]): string[] {
             continue;
         }
         // `- 路径` 或裸路径
-        const bare = trimmed.replace(/^[-*•]\s*/, '').trim();
+        const bare = trimmed;
         if (
             bare &&
             !/^(决策|清单|Check|List|更新|变量|需要|以下|本轮|建议|Update|Decide)/i.test(bare)

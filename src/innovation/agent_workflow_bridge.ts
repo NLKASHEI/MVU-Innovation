@@ -46,6 +46,7 @@ import {
     poolQueryLoreByPaths,
     poolQueryRulesByPaths,
     AiByIndex,
+    AiMandatoryByIndex,
     PooledEntry,
     PoolIndexStats,
     PoolMarker,
@@ -334,7 +335,9 @@ interface PersistedPool {
     aiBatchesTotal: number;
 }
 
-const POOL_STORAGE_KEY = 'nlkaleido:worldbook_pool_v1';
+const POOL_STORAGE_KEY = 'nlkaleido:worldbook_pool_v2';
+/** 持久化池结构版本（v2：AI 细粒度强制标记；旧版粗粒度 mandatoryPaths 的池直接重建） */
+const POOL_STORAGE_VERSION = 2;
 /** 持久化池最多保留的卡数（LRU，按 builtAt 淘汰最旧） */
 const POOL_STORAGE_MAX = 5;
 /** 池 TTL：24h（进入同一卡/重载脚本直接读回持久化池，不重建） */
@@ -418,7 +421,7 @@ function savePersistedPool(state: PoolState): void {
     try {
         const pools = loadPersistedPools();
         const persisted: PersistedPool = {
-            version: 1,
+            version: POOL_STORAGE_VERSION,
             key: state.key,
             builtAt: state.builtAt,
             entries: state.pool.entries.map(e => ({
@@ -498,11 +501,12 @@ function poolFromPersisted(p: PersistedPool): PoolState {
     };
 }
 
-/** 尝试从 localStorage 读回指定 key 的池（未过期） */
+/** 尝试从 localStorage 读回指定 key 的池（未过期且结构版本匹配） */
 function loadPersistedPool(key: string): PoolState | null {
     const pools = loadPersistedPools();
     const persisted = pools[key];
-    if (!persisted || Date.now() - persisted.builtAt >= POOL_TTL_MS) return null;
+    if (!persisted || persisted.version !== POOL_STORAGE_VERSION) return null;
+    if (Date.now() - persisted.builtAt >= POOL_TTL_MS) return null;
     try {
         return poolFromPersisted(persisted);
     } catch {
@@ -512,7 +516,7 @@ function loadPersistedPool(key: string): PoolState | null {
 
 /**
  * AI 规则分池（v1.11.4）：让模型【分批完整阅读】[mvu_update] 规则条目，输出每条规则
- * 管辖/关联的变量路径——规则→路径映射全部由 AI 语义确定，无正则提取。
+ * 管辖/关联的变量路径 + 细粒度强制标记（v1.12.1）——规则→路径映射全部由 AI 语义确定，无正则提取。
  *
  * 读取策略（对齐用户「一次读不完就慢慢读，分批次读」）：
  *   - 规则内容【完整】交给 AI（不截断 800；仅超过单条上限 8000 才截断，对齐原版条目上限）
@@ -522,7 +526,7 @@ function loadPersistedPool(key: string): PoolState | null {
  * 下标约定：entries 必须是【已过滤】的可用条目（enabled !== false 且 content 非空），
  * AI 输出序号 = 该数组下标（buildWorldbookPool 内部经 indexMap 映射，防错位）。
  * @param entries 已过滤的可用条目（tavern-helper 形状）
- * @returns { byIndex, batchesOk, batchesTotal, durationMs }；全批失败返回 null
+ * @returns { byIndex, mandatoryByIndex, batchesOk, batchesTotal, durationMs }；全批失败返回 null
  */
 const AI_CLASSIFY_BATCH = 15;
 /** 每批总字符预算（约 12k token；超出自动拆下一批慢慢读） */
@@ -565,6 +569,7 @@ async function aiClassifyEntries(
 
     const started = Date.now();
     const byIndex: AiByIndex = new Map();
+    const mandatoryByIndex: AiMandatoryByIndex = new Map();
     let batchesOk = 0;
     const batchesTotal = batches.length;
 
@@ -585,12 +590,14 @@ async function aiClassifyEntries(
             `以下是变量更新规则条目清单（第 ${b + 1}/${batchesTotal} 批，共 ${batchIndexes.length} 条）。`,
             '请【完整阅读】每条规则，确定它管辖/关联的变量路径（相对于 stat_data，如 主角.境界）。',
             '输出 JSON 数组，元素与规则一一对应：',
-            '[{"idx":0,"paths":["主角.境界"],"topic":"境界突破"},',
-            ' {"idx":1,"paths":[],"topic":""}]',
+            '[{"idx":0,"paths":["主角.境界"],"mandatory":["主角.境界"],"topic":"境界突破"},',
+            ' {"idx":1,"paths":[],"mandatory":[],"topic":""}]',
             '要求：',
             '- idx 必须与规则序号一致，不得遗漏任何一条，不得编造不存在的规则。',
             '- paths 为规则管辖的变量路径；规则正文没写变量名的，凭语义推断管辖路径；',
             '  与变量无关给空数组 []。',
+            '- mandatory 为【该规则中明确标注 MANDATORY/必须/每轮/always】的管辖路径子集；',
+            '  规则中某条路径被标注强制更新才列入，没有则给空数组 []（不得整条规则全标）。',
             '- 不要输出解释，只输出 JSON。',
             '</must>',
             '',
@@ -602,9 +609,13 @@ async function aiClassifyEntries(
             const text = normalizeGenerateText(await generateRaw(config));
             const parsed = parseAiClassification(text, batchIndexes.length);
             if (parsed) {
-                for (const [local_idx, paths] of parsed) {
+                for (const [local_idx, paths] of parsed.paths) {
                     const global_idx = batchIndexes[local_idx];
                     if (global_idx !== undefined) byIndex.set(global_idx, paths);
+                }
+                for (const [local_idx, m] of parsed.mandatory) {
+                    const global_idx = batchIndexes[local_idx];
+                    if (global_idx !== undefined) mandatoryByIndex.set(global_idx, m);
                 }
                 batchesOk++;
             }
@@ -614,10 +625,10 @@ async function aiClassifyEntries(
     }
 
     if (batchesOk === 0) return null;
-    return { byIndex, batchesOk, batchesTotal, durationMs: Date.now() - started };
+    return { byIndex, mandatoryByIndex, batchesOk, batchesTotal, durationMs: Date.now() - started };
 }
 
-/** AI 规则分池：让模型分批完整阅读规则条目，重建池（合并规则路径精确层） */
+/** AI 规则分池：让模型分批完整阅读规则条目，重建池（合并规则路径精确层 + 细粒度强制标记） */
 async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
     if (state.pool.entries.length === 0) {
         return { ...state, aiAttempted: true, aiLastAttemptAt: Date.now() };
@@ -632,7 +643,10 @@ async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
             aiBatchesTotal: Math.ceil(state.rawEntries.length / AI_CLASSIFY_BATCH),
         };
     }
-    const pool = buildWorldbookPool(state.rawEntries, { aiByIndex: result.byIndex });
+    const pool = buildWorldbookPool(state.rawEntries, {
+        aiByIndex: result.byIndex,
+        aiMandatoryByIndex: result.mandatoryByIndex,
+    });
     return {
         ...state,
         pool,
