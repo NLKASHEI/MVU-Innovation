@@ -1231,9 +1231,10 @@ export async function runAgentWorkflowForMessage(
             entry.worldbook = state.scan;
             const rules = poolQueryRulesByPaths(state.pool, paths);
             const lore = poolQueryLoreByPaths(state.pool, lorePaths ?? paths, story, {
-                maxEntries: 10,
-                maxTotalChars: 6000,
-                maxEntryLength: 1000,
+                // 预算收紧（v2.0.1）：背景 7 条人物详情 ≈6000 字符每轮全量重发太肥
+                maxEntries: 6,
+                maxTotalChars: 4000,
+                maxEntryLength: 800,
             });
             entry.loreCount = lore.length;
             return {

@@ -456,6 +456,27 @@ export interface ObservationOptions {
     maxValueLen?: number;
     /** 最大字段数（超出折叠为摘要行，默认 60） */
     maxFields?: number;
+    /** record 动态对象子字段模板（ZOD 变量仓库解析产物）：容器路径 → 子字段清单 */
+    recordFields?: Record<string, string[]>;
+}
+
+/**
+ * 从 ZOD 变量仓库路径中提取 record 容器的子字段模板：
+ * `绝色榜.<键>.排名` → { 绝色榜: ['排名', '头衔', '仙姿', '群芳谱'] }
+ * 观察投影对空 record 显示子字段清单——模型初始化/更新条目时不再漏字段（如漏「头衔」）。
+ */
+export function extractRecordFields(zodPaths: string[]): Record<string, string[]> {
+    const map: Record<string, string[]> = {};
+    for (const raw of zodPaths ?? []) {
+        const m = String(raw).match(/^(.*)\.<键>\.([^.]+)$/);
+        if (!m) continue;
+        const container = normalizePath(m[1]);
+        const field = m[2];
+        if (!container || !field) continue;
+        if (!map[container]) map[container] = [];
+        if (!map[container].includes(field)) map[container].push(field);
+    }
+    return map;
 }
 
 function stringifyValue(value: unknown): string {
@@ -470,6 +491,8 @@ function stringifyValue(value: unknown): string {
 
 /**
  * 观察层投影（§3.6 下放）：只暴露候选路径的值，长值截断、超限折叠。
+ * record 容器（绝色榜/人物/道侣…）显示子字段模板（来自 ZOD 变量仓库），
+ * 模型初始化/更新条目时知道该填哪些字段。
  * 绝不把完整状态直接暴露给模型（token 浪费 + 越权上下文）。
  */
 export function buildObservation(
@@ -479,6 +502,7 @@ export function buildObservation(
 ): Observation {
     const max_value_len = opts.maxValueLen ?? 300;
     const max_fields = opts.maxFields ?? 60;
+    const record_fields = opts.recordFields ?? {};
     const seen: string[] = [];
     const lines: string[] = [];
     // 先统计全部存在的候选数（用于折叠计数）
@@ -496,6 +520,11 @@ export function buildObservation(
         seen.push(path);
         let text = stringifyValue(value);
         if (text.length > max_value_len) text = text.slice(0, max_value_len) + '…';
+        // record 容器：附子字段模板（模型初始化/更新条目时知道该填哪些字段）
+        const subfields = record_fields[path];
+        if (subfields && subfields.length > 0) {
+            text += `（record 子字段：${subfields.join('/')}）`;
+        }
         lines.push(`- ${path}: ${text}`);
     }
 
@@ -966,11 +995,12 @@ export async function runAgentWorkflow(
         const fetched = await executor.fetchRules(due, input.story, candidates);
         base.rules = fetched;
 
-        // ---- 阶段4 观察层投影（只投影决策路径的值） ----
+        // ---- 阶段4 观察层投影（只投影决策路径的值；record 容器附子字段模板） ----
         stages.push('observe');
         const observation = buildObservation(input.state, due, {
             maxValueLen: options.maxValueLen,
             maxFields: options.maxFields,
+            recordFields: extractRecordFields(rules.zodPaths ?? []),
         });
         base.observation = observation;
         if (observation.paths.length === 0) return finish('no_change');

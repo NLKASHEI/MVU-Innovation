@@ -4,6 +4,7 @@ import {
     buildObservation,
     buildVariableIndex,
     enumerateLeafPaths,
+    extractRecordFields,
     filterRelevantLore,
     filterRelevantRules,
     parseDecidePaths,
@@ -252,6 +253,42 @@ describe('buildObservation（观察层投影）', () => {
     test('空候选/空状态返回空观察', () => {
         expect(buildObservation(STATE, []).paths).toEqual([]);
         expect(buildObservation({}, ['a.b']).paths).toEqual([]);
+    });
+
+    test('record 容器显示子字段模板（模型不再漏字段，v2.0.1）', () => {
+        const obs = buildObservation(
+            { 绝色榜: {}, 人物: {} },
+            ['绝色榜', '人物'],
+            {
+                recordFields: {
+                    绝色榜: ['排名', '头衔', '仙姿', '群芳谱'],
+                    人物: ['性别', '境界', '好感', '描述'],
+                },
+            }
+        );
+        expect(obs.text).toContain('绝色榜: {}（record 子字段：排名/头衔/仙姿/群芳谱）');
+        expect(obs.text).toContain('人物: {}（record 子字段：性别/境界/好感/描述）');
+    });
+});
+
+describe('extractRecordFields（ZOD 仓库 record 子字段模板提取）', () => {
+    test('从模板路径提取容器子字段', () => {
+        const fields = extractRecordFields([
+            '绝色榜.<键>.排名',
+            '绝色榜.<键>.头衔',
+            '绝色榜.<键>.仙姿',
+            '绝色榜.<键>.群芳谱',
+            '人物.<键>.好感',
+            '道侣',
+        ]);
+        expect(fields['绝色榜']).toEqual(['排名', '头衔', '仙姿', '群芳谱']);
+        expect(fields['人物']).toEqual(['好感']);
+        // 非模板路径不产生容器
+        expect(fields['道侣']).toBeUndefined();
+    });
+
+    test('空输入返回空映射', () => {
+        expect(extractRecordFields([])).toEqual({});
     });
 });
 
