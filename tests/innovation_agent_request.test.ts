@@ -5,7 +5,31 @@ import {
     buildDecideTask,
     createJsonPatchResponseSchema,
     normalizeGenerateText,
+    squashStory,
 } from '@/innovation/agent_request';
+
+describe('squashStory（剧情压缩，万花筒 §5.4 L3 squash 下放）', () => {
+    test('相邻同发件人消息合并去重前缀', () => {
+        const story = '角色A：第一句\n角色A：第二句\n角色B：另一句';
+        const out = squashStory(story);
+        expect(out).toContain('角色A：第一句 第二句');
+        expect(out).not.toContain('角色A：第二句\n');
+        expect(out).toContain('角色B：另一句');
+    });
+
+    test('截断到上限', () => {
+        const story = '角色A：' + 'x'.repeat(500);
+        const out = squashStory(story, 200);
+        expect(out.length).toBeLessThanOrEqual(210);
+        expect(out).toContain('剧情压缩截断');
+    });
+
+    test('不同发件人不合并，空输入返回空', () => {
+        const story = 'A：1\nB：2\nA：3';
+        expect(squashStory(story)).toBe('A：1\nB：2\nA：3');
+        expect(squashStory('')).toBe('');
+    });
+});
 
 describe('buildDecideTask', () => {
     test('包含剧情、候选清单与决策指令', () => {

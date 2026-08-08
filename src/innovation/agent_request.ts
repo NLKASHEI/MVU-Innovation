@@ -14,6 +14,44 @@
  * 纯逻辑零依赖（只拼字符串/对象），可独立单测。
  */
 
+/**
+ * 剧情压缩（对齐万花筒 §5.4 L3 最近剧情 squash，G7 下放）：
+ * 相邻同发件人消息合并（去重复角色名前缀）后截断。
+ * 用途：决策阶段只判断「发生了什么 → 哪些变量相关」，用压缩剧情即可；
+ * 更新阶段算新值才用完整剧情——两次调用不再重复喂同一份 6000 字符。
+ */
+export function squashStory(story: string, maxChars: number = 4000): string {
+    if (!story) return '';
+    const lines = String(story).split('\n');
+    const merged: string[] = [];
+    for (const line of lines) {
+        const m = line.match(/^([^:：]{1,30})[:：]\s*(.*)$/);
+        if (m) {
+            const name = m[1];
+            const content = m[2];
+            const last = merged[merged.length - 1];
+            const lastM = last?.match(/^([^:：]{1,30})[:：]\s*(.*)$/);
+            if (lastM && lastM[1] === name) {
+                merged[merged.length - 1] = `${name}：${lastM[2]} ${content}`;
+                continue;
+            }
+            merged.push(line);
+        } else {
+            merged.push(line);
+        }
+    }
+    let text = merged.join('\n');
+    if (text.length > maxChars) {
+        text = text.slice(0, maxChars) + '\n…（剧情压缩截断）';
+    }
+    return text;
+}
+
+/** 决策阶段剧情上限（压缩版，判断相关性足够） */
+export const DECIDE_STORY_MAX = 4000;
+/** 更新阶段剧情上限（完整版，算新值需要细节） */
+export const UPDATE_STORY_MAX = 6000;
+
 /** 决策阶段提示词：对启发式候选清单逐项 Y/N 判断（防偷懒 + 强制更新 + 跨轮上下文） */
 export function buildDecideTask(opts: {
     story: string;

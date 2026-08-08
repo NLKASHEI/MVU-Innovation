@@ -4,6 +4,8 @@ import { isFunctionCallingSupported } from '@/function/is_function_calling_suppo
 import { cleanUpMetadata, reconcileAndApplySchema } from '@/function/schema';
 import { onMessageReceived } from '@/function/update/on_message_received';
 import { handleVariablesInMessage, updateVariables } from '@/function/update_variables';
+import { retryLastAgentWorkflow } from '@/innovation/agent_workflow_bridge';
+import { loadInnovationSettings } from '@/innovation/settings';
 import { useDataStore } from '@/store';
 import { getLastValidMessageId, getLastValidVariable } from '@/util';
 import { MvuData } from '@/variable_def';
@@ -388,6 +390,18 @@ export const buttons: Button[] = [
     {
         name: '重试额外模型解析',
         function: async () => {
+            // [革新版接管] Agent 工作流开启时，重试走革新版完整工作流
+            // （决策→拉取→观察→更新→校验），不再走原版 onMessageReceived（已被接管 guard 拦截）
+            if (loadInnovationSettings(localStorage).agentEnabled) {
+                const result = await retryLastAgentWorkflow();
+                if (result) {
+                    toastr.info(
+                        `解析完成（${result.termination}，阶段 ${result.stages.join('→')}）`,
+                        '[革新版·Agent]重试额外模型解析'
+                    );
+                }
+                return;
+            }
             const store = useDataStore();
             if (store.settings.更新方式 === '随AI输出') {
                 toastr.info(

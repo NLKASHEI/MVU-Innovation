@@ -36,7 +36,9 @@ import {
     buildDecideTask,
     createAiClassifySchema,
     createJsonPatchResponseSchema,
+    DECIDE_STORY_MAX,
     normalizeGenerateText,
+    squashStory,
 } from '@/innovation/agent_request';
 import {
     pickUpdateWorldbookNames,
@@ -1104,14 +1106,15 @@ export async function runAgentWorkflowForMessage(
             };
         },
         // 阶段2 AI 决策：对启发式候选清单逐项 Y/N 判断（防偷懒 + 强制更新 + 跨轮上下文）。
-        // 候选已由本地启发式筛过（AI 规则路径 ∪ 剧情命中），决策只能选候选内。
+        // 决策用【压缩剧情】（相邻消息合并 + 截断 4000）——判断「发生了什么」足够，
+        // 不再与更新阶段重复喂同一份完整 6000 字符剧情（万花筒 §5.4 L3 squash 下放）。
         decide: async (
             input: { story: string; candidates: string[]; mandatory?: string[] },
             last_error?: string
         ) => {
             const call_started = Date.now();
             const task = buildDecideTask({
-                story: input.story,
+                story: squashStory(input.story, DECIDE_STORY_MAX),
                 candidates: input.candidates,
                 mandatory: input.mandatory,
                 lastRound: last_round_summary,
