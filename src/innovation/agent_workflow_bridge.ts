@@ -1,25 +1,34 @@
 /**
- * [革新版·独立 Agent 工作流执行器] 运行时桥接层。
+ * [革新版·独立 Agent 工作流执行器 v2] 运行时桥接层。
  *
- * 革新版自己的 Agent 更新链路——**不复用 MVU 的 invokeExtraModelWithStrategy / onMessageReceived**：
+ * 革新版自己的 Agent 更新链路——不复用 MVU 的 invokeExtraModelWithStrategy / onMessageReceived：
  *   - 自己监听 tavern_events.MESSAGE_RECEIVED
  *   - 自己读取当前变量状态（getVariables）
  *   - 自己构造请求（tavern-helper 底层 generateRaw，见 agent_request.ts）
  *   - 自己读取世界书规则（getWorldbook，见 agent_worldbook.ts）
- *   - 自己执行四阶段工作流（agent_workflow.ts：检查→读规则→更新→自检）
- *   - 自己应用变量（updateVariablesWith / replaceVariables）
+ *   - 自己执行单次 Agent 回合工作流（agent_workflow.ts：读规则→dueFields 调度→观察→一步更新→校验）
+ *   - 变量应用【复用原版 MVU 的命令解释器 updateVariables】（魔改原版：校验过的
+ *     delta 回放给原版解释器，原版负责 VWD/schema/display_data 等全部语义）
+ *
+ * v2 修复（相对 v1 四阶段检查工作流）：
+ *   - 移除「盲检查」阶段：v1 的 check 请求只有 stat_data 文本、无剧情上下文，
+ *     模型根本看不到剧情；现在剧情上下文（extractRecentStory）显式构造进更新请求。
+ *   - 移除对原版 MVU 设置（store.settings.更新方式）的依赖——革新版独立开关即可。
+ *   - 应用层不再用弱正则，改为回放给原版 updateVariables（支持命令方言 + JSON Patch 方言）。
  *
  * 本文件依赖 tavern-helper 全局（已通过 slash-runner/@types 声明），仅作运行时接入，不纳入单测。
- * 纯逻辑部分（请求构造/规则筛选/工作流编排）均有独立单测。
+ * 纯逻辑部分（请求构造/调度/投影/校验/工作流编排）均有独立单测。
  */
 
-import { runAgentWorkflow, AgentWorkflowResult } from '@/innovation/agent_workflow';
+import { runAgentWorkflow, AgentWorkflowResult, PreparedOps } from '@/innovation/agent_workflow';
 import {
-    buildCheckRawConfig,
-    buildUpdateRawConfig,
+    buildAgentUpdateRawConfig,
+    buildAgentUpdateTask,
+    createJsonPatchResponseSchema,
     normalizeGenerateText,
 } from '@/innovation/agent_request';
 import { selectUpdateRules } from '@/innovation/agent_worldbook';
+import { updateVariables } from '@/function/update_variables';
 import { loadInnovationSettings } from '@/innovation/settings';
 import { useDataStore } from '@/store';
 
@@ -30,20 +39,48 @@ export function getLastWorkflowResult(): AgentWorkflowResult | null {
     return last_workflow_result;
 }
 
-/** 从当前消息提取「当前变量状态」文本（供检查阶段） */
-function extractStateText(message_id: number): string {
+/** 从当前消息提取「当前变量状态」文本（供观察层投影） */
+function extractStateText(message_id: number): Record<string, any> | null {
     try {
         const vars: any = getVariables({ type: 'message', message_id });
         const stat = vars?.stat_data;
-        if (stat === undefined) return '';
-        return typeof stat === 'string' ? stat : JSON.stringify(stat, null, 2);
+        if (stat === undefined || stat === null) return null;
+        return typeof stat === 'object' ? stat : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 提取「最近剧情」文本（对齐万花筒 L3 尾部 recent_story 的下放版）：
+ * 取最近 N 条消息（跳过 system/空消息），带角色名前缀，截断到上限。
+ */
+function extractRecentStory(
+    message_id: number,
+    max_messages: number = 6,
+    max_chars: number = 6000
+): string {
+    try {
+        const messages: any[] = getChatMessages(message_id);
+        if (!Array.isArray(messages) || messages.length === 0) return '';
+        const recent = messages
+            .filter((m: any) => m && typeof m.message === 'string' && m.message.trim().length > 0)
+            .slice(-max_messages);
+        const lines: string[] = [];
+        for (const m of recent) {
+            const name = typeof m.name === 'string' && m.name ? m.name : m.role === 'user' ? 'user' : 'assistant';
+            lines.push(`${name}: ${m.message.trim()}`);
+        }
+        let text = lines.join('\n');
+        if (text.length > max_chars) text = text.slice(0, max_chars) + '\n…（剧情过长已截断）';
+        return text;
     } catch {
         return '';
     }
 }
 
-/** 读取当前角色可用世界书的 [mvu_update] 规则 */
-async function readWorldbookRules(paths: string[]): Promise<string[]> {
+/** 读取当前角色可用世界书的 [mvu_update] 规则（全部，不按路径过滤——调度在核心做） */
+async function readWorldbookRules(): Promise<string[]> {
     try {
         const names: string[] = getWorldbookNames();
         const entries: any[] = [];
@@ -55,7 +92,7 @@ async function readWorldbookRules(paths: string[]): Promise<string[]> {
                 /* 单个世界书读取失败不阻断 */
             }
         }
-        return selectUpdateRules(entries, paths).entries;
+        return selectUpdateRules(entries, []).entries;
     } catch {
         return [];
     }
@@ -72,19 +109,67 @@ function extractUpdateBlock(text: string): string {
     return text.trim();
 }
 
-/** 简易格式自检：必须含有效更新命令 */
-function selfCheckUpdateBlock(block: string): { ok: boolean; reason?: string } {
-    if (!block) return { ok: false, reason: '更新块为空' };
-    const has_set = /_\.(?:set|insert|assign|remove|unset|delete|add)\s*\([\s\S]*?\)\s*;/.test(block);
-    const has_patch = /json_?patch/i.test(block);
-    if (!has_set && !has_patch) {
-        return { ok: false, reason: '更新块内没有有效更新命令（_.set(...) 或 json_patch）' };
+/**
+ * 把结构化输出（{analysis, json_patch} 或 op 数组，含代码围栏）包成 <UpdateVariable><JSONPatch> 块，
+ * 让核心统一走 sanitizeJsonPatch 通道。不是 JSON → 返回 null（走文本通道）。
+ */
+function wrapStructuredPatch(text: string): string | null {
+    const json_text = text
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/```\s*$/, '')
+        .trim();
+    if (!(json_text.startsWith('[') || json_text.startsWith('{'))) return null;
+    try {
+        const parsed: unknown = JSON.parse(json_text);
+        const patch = Array.isArray(parsed)
+            ? parsed
+            : parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+              ? (parsed as Record<string, unknown>).json_patch ??
+                (parsed as Record<string, unknown>).jsonPatch ??
+                (parsed as Record<string, unknown>).patch ??
+                (parsed as Record<string, unknown>).delta
+              : undefined;
+        if (Array.isArray(patch)) {
+            return `<UpdateVariable>\n<JSONPatch>${JSON.stringify(patch)}</JSONPatch>\n</UpdateVariable>`;
+        }
+    } catch {
+        /* 不是 JSON → 文本通道 */
     }
-    return { ok: true };
+    return null;
 }
 
 /**
- * 对一条 MESSAGE_RECEIVED 执行革新版四阶段工作流。
+ * 把校验通过的 ops 回放给原版 MVU 命令解释器（updateVariables）应用一次。
+ * 命令方言 → 原样拼接命令文本；JSON Patch 方言 → 包 <JSONPatch> 标签。
+ * 原版解释器负责 VWD/schema/display_data/事件等全部语义；返回是否实际修改。
+ */
+async function applyPreparedOps(prepared: PreparedOps): Promise<{ applied: boolean }> {
+    const parts: string[] = [];
+    for (const cmd of prepared.commands) {
+        if (cmd.fullMatch) parts.push(cmd.fullMatch);
+    }
+    if (prepared.patch && prepared.patch.length > 0) {
+        parts.push(`<JSONPatch>${JSON.stringify(prepared.patch)}</JSONPatch>`);
+    }
+    const delta_text = parts.join('\n');
+    if (!delta_text.trim()) return { applied: false };
+
+    const message_id = getLastMessageId();
+    if (message_id === null || message_id === undefined) return { applied: false };
+
+    const variables: any = getLastValidVariable(message_id + 1);
+    if (!variables || !_.has(variables, 'stat_data')) return { applied: false };
+
+    const has_variable_modified = await updateVariables(delta_text, variables);
+    if (has_variable_modified && useDataStore().settings.兼容性.更新到聊天变量) {
+        await replaceVariables(variables, { type: 'chat' });
+    }
+    await replaceVariables(variables, { type: 'message', message_id });
+    return { applied: has_variable_modified };
+}
+
+/**
+ * 对一条 MESSAGE_RECEIVED 执行革新版单次 Agent 回合工作流。
  * @param message_id 收到的消息 id
  * @returns 工作流结果；Agent 未启用或状态缺失时返回 null
  */
@@ -94,14 +179,16 @@ export async function runAgentWorkflowForMessage(
     const settings = loadInnovationSettings(localStorage);
     if (!settings.agentEnabled) return null;
 
-    const state_text = extractStateText(message_id);
-    if (!state_text) {
+    const state = extractStateText(message_id);
+    if (!state) {
         // 无变量状态可更新 → 记录一个 no_change
         last_workflow_result = {
             stages: [],
-            check: null,
             rules: null,
+            due: null,
+            observation: null,
             update: null,
+            prepared: null,
             selfCheck: null,
             termination: 'no_change',
             retries: 0,
@@ -110,43 +197,57 @@ export async function runAgentWorkflowForMessage(
         return last_workflow_result;
     }
 
+    const story = extractRecentStory(message_id);
     // 自定义额外模型配置（可选；缺省用当前插头）
     const custom_api: Record<string, any> | undefined = undefined;
 
     const executor = {
-        // 阶段1 检查：只列出需要更新的变量
-        check: async (state: string) => {
-            const config = buildCheckRawConfig({ state_text: state, custom_api });
-            const result = normalizeGenerateText(await generateRaw(config));
-            return result;
-        },
-        // 阶段2 读取相应规则
-        readRules: async (paths: string[]) => {
-            const entries = await readWorldbookRules(paths);
+        // 阶段1 读规则：本地读取全部 [mvu_update] 规则（零模型调用）
+        readRules: async () => {
+            const entries = await readWorldbookRules();
             return { entries, raw: entries.join('\n---\n') };
         },
-        // 阶段3 更新：基于规则产出 delta 并应用【一次】
-        update: async (rules: { entries: string[] }, check_raw: string, last_error?: string) => {
-            const config = buildUpdateRawConfig({
-                rules: rules.entries,
-                check_raw,
-                last_error,
-                custom_api,
-            });
-            const result = normalizeGenerateText(await generateRaw(config));
-            const block = extractUpdateBlock(result);
-            if (!block) {
-                return { block: '', applied: false, raw: result };
+        // 阶段4 一步 agent 回合：基于（剧情+观察+规则）产出 delta。
+        // 首选结构化输出（json_schema，ST 自动按 provider 转换：OpenAI → response_format，
+        // Claude → 强制工具调用）；provider 不支持时降级纯文本指令。
+        update: async (ctx: { story: string; observation: string; rules: string[] }, last_error?: string) => {
+            let result: unknown;
+            try {
+                const config = buildAgentUpdateRawConfig({
+                    task: buildAgentUpdateTask({
+                        story: ctx.story,
+                        observation: ctx.observation,
+                        rules: ctx.rules,
+                        last_error,
+                        structured: true,
+                    }),
+                    custom_api,
+                    json_schema: createJsonPatchResponseSchema(),
+                });
+                result = await generateRaw(config);
+            } catch {
+                // 降级：纯文本指令（模型输出 <UpdateVariable> 块）
+                const fallback_config = buildAgentUpdateRawConfig({
+                    task: buildAgentUpdateTask({
+                        story: ctx.story,
+                        observation: ctx.observation,
+                        rules: ctx.rules,
+                        last_error,
+                    }),
+                    custom_api,
+                });
+                result = await generateRaw(fallback_config);
             }
-            // 应用到最新变量
-            const applied = await applyDeltaBlock(block);
-            return { block, applied, raw: result };
+            const text = normalizeGenerateText(result);
+            const structured_block = wrapStructuredPatch(text);
+            if (structured_block) return { block: structured_block, raw: text };
+            return { block: extractUpdateBlock(text), raw: text };
         },
-        // 阶段4 格式自检
-        selfCheck: async (block: string) => selfCheckUpdateBlock(block),
+        // 阶段5 应用：回放给原版 updateVariables
+        apply: async (prepared: PreparedOps) => applyPreparedOps(prepared),
     };
 
-    const workflow_result = await runAgentWorkflow(executor, state_text, {
+    const workflow_result = await runAgentWorkflow(executor, { state, story }, {
         maxRetries: Math.max(1, settings.maxSteps - 1),
         loopThreshold: settings.loopThreshold,
     });
@@ -162,82 +263,14 @@ export async function runAgentWorkflowForMessage(
     return workflow_result;
 }
 
-/** 把 <UpdateVariable> 块解析成可执行命令文本，并用 tavern-helper 变量 API 应用一次 */
-async function applyDeltaBlock(block: string): Promise<boolean> {
-    const delta = extractDeltaText(block);
-    if (!delta) return false;
-
-    const message_id = getLastMessageId();
-    const variables: any = getVariables({ type: 'message', message_id: message_id ?? -1 });
-    if (!variables || !_.has(variables, 'stat_data')) return false;
-
-    let modified = false;
-    updateVariablesWith(
-        vars => {
-            try {
-                // 复用轻量命令提取：_.set(path, value) 等
-                const set_regex = /_\.set\s*\(\s*['"](.+?)['"]\s*,\s*(.+?)\s*\)\s*;/gs;
-                let m: RegExpExecArray | null;
-                let touched = false;
-                while ((m = set_regex.exec(delta)) !== null) {
-                    const path = m[1];
-                    const raw_value = m[2];
-                    let value: any = raw_value;
-                    try {
-                        value = JSON.parse(raw_value);
-                    } catch {
-                        value = raw_value.replace(/^['"]|['"]$/g, '');
-                    }
-                    _.set(vars.stat_data, path, value);
-                    touched = true;
-                }
-                if (touched) modified = true;
-            } catch {
-                /* ignore */
-            }
-            return vars;
-        },
-        { type: 'message', message_id: message_id ?? -1 }
-    );
-
-    if (modified && useDataStore().settings.兼容性.更新到聊天变量) {
-        updateVariablesWith(
-            vars => {
-                try {
-                    _.set(vars, 'stat_data', variables.stat_data);
-                } catch {
-                    /* ignore */
-                }
-                return vars;
-            },
-            { type: 'chat' }
-        );
-    }
-    return modified;
-}
-
-/** 从更新块中提取命令文本（去掉 <UpdateVariable> 标签） */
-function extractDeltaText(block: string): string {
-    if (!block) return '';
-    return block
-        .replace(/<UpdateVariable>/gi, '')
-        .replace(/<\/UpdateVariable>/gi, '')
-        .replace(/<Analysis>[\s\S]*?<\/Analysis>/gi, '')
-        .trim();
-}
-
 /**
  * 初始化革新版独立 Agent 工作流监听。
- * 自己监听 MESSAGE_RECEIVED，不复用 MVU 的 onMessageReceived。
+ * 自己监听 MESSAGE_RECEIVED，不复用 MVU 的 onMessageReceived；
+ * 是否启用完全由革新版自身设置（agentEnabled）决定，不依赖原版 MVU 的更新方式配置。
  * @returns 停止函数
  */
 export function initAgentWorkflowBridge(): () => void {
     const { stop } = eventOn(tavern_events.MESSAGE_RECEIVED, async (message_id: number) => {
-        // 革新的更新方式必须是「额外模型解析」（与 MVU 兼容路径），否则不接管
-        const store = useDataStore();
-        if (store.settings.更新方式 !== '额外模型解析') {
-            return;
-        }
         await runAgentWorkflowForMessage(message_id);
     });
     return () => {

@@ -1,136 +1,243 @@
 /**
- * [革新版·独立请求构造] 纯逻辑模块。
+ * [革新版·独立请求构造 v2] 纯逻辑模块。
  *
- * 革新版自己的 Agent 请求构造——不依赖 MVU 的 invokeExtraModelWithStrategy / extra_model_task，
- * 直接按 tavern-helper 底层 generateRaw 的 GenerateRawConfig 构造。
+ * 对齐万花筒 §3.4「单次模式 = 一步 agent 回合」：不再有独立的「检查」模型请求
+ * （v1 的检查请求只有变量状态文本、没有剧情上下文，是盲人摸象；且要求模型
+ * 逐行列出全部变量 Y/N，是 MVU 的反面教材）。候选范围改由本地 dueFields 调度
+ * （见 agent_workflow.ts），模型每轮只发一次「更新」请求：
  *
- * 四阶段工作流对应两种请求：
- *   - check（检查）：让模型只输出「需要更新的变量清单」（不产出更新块）
- *   - update（更新）：基于已读取的规则产出 <UpdateVariable> delta
- * 自检在本地完成（见 agent_apply.ts），无需模型请求。
+ *   最近剧情（story，桥接层从聊天消息提取） + 观察层投影（observation） + 相关规则
+ *   → 模型输出 <UpdateVariable> 块（命令方言或 JSON Patch 方言）
+ *
+ * 请求构造直接按 tavern-helper 底层 generateRaw 的 GenerateRawConfig 构造，
+ * 动态内容（任务）压尾部，利于前缀缓存。
  *
  * 纯逻辑零依赖（只拼字符串/对象），可独立单测。
  */
 
-/** 检查阶段提示词：只列出需要更新的变量，不更新 */
-export function buildCheckTask(state_text: string): string {
-    return [
-        '<must>',
-        '你是变量更新 Agent。仅执行【检查】阶段，不要输出任何 <UpdateVariable> 更新块。',
-        '基于以下最新剧情与当前变量状态，判断哪些变量需要更新。',
-        '逐行输出格式（每行一个变量路径 + 判断）：',
-        '  变量路径: Y    （需要更新）',
-        '  变量路径: N    （不需要更新）',
-        '不要输出解释，不要输出更新命令。若都不需要更新，输出：none',
-        '</must>',
-        '',
-        '当前变量状态：',
-        state_text,
-    ].join('\n');
-}
-
-/** 更新阶段提示词：基于规则产出 delta（一次） */
-export function buildUpdateTask(
-    rules: string[],
-    check_raw: string,
-    last_error?: string
-): string {
+/** 更新阶段提示词：基于剧情 + 观察 + 规则产出 delta（一步 agent 回合） */
+export function buildAgentUpdateTask(opts: {
+    story: string;
+    observation: string;
+    rules: string[];
+    last_error?: string;
+    /** 结构化输出模式（配合 json_schema）：要求模型输出 {analysis, json_patch} JSON */
+    structured?: boolean;
+}): string {
+    const format_instructions = opts.structured
+        ? [
+              '你必须以结构化 JSON 输出（不要 <UpdateVariable> 标签、不要解释）：',
+              '  {"analysis": "英文简要推理", "json_patch": [{"op":"replace","path":"/理/好感度","value":50}]}',
+              'json_patch 的 op 支持 replace/delta/insert/add/remove/move，path 为 JSON Pointer。',
+          ]
+        : [
+              '更新块格式（二选一）：',
+              '  格式A（命令方言）：',
+              '    <UpdateVariable>',
+              '      _.set(\'变量路径\', 新值);//原因',
+              '      _.insert(\'变量路径\', 新值);',
+              '    </UpdateVariable>',
+              '  格式B（JSON Patch 方言）：',
+              '    <UpdateVariable>',
+              '      <JSONPatch>[{"op":"replace","path":"/理/好感度","value":50}]</JSONPatch>',
+              '    </UpdateVariable>',
+          ];
     const parts = [
         '<must>',
-        '你是变量更新 Agent。基于检查结果与以下相关规则，输出 <UpdateVariable> 更新块。',
-        '只更新【检查结果中判定为 Y】的变量，不要重复更新不需要更新的变量。',
-        '格式：',
-        '<UpdateVariable>',
-        '  <Analysis>.../Analysis>',
-        '  _.set(\'变量路径\', 新值);//原因',
-        '</UpdateVariable>',
-        '只输出一个 <UpdateVariable> 块，不要额外解释。',
+        '你是变量更新 Agent。基于以下「最近剧情」与「变量观察」，判断哪些变量需要更新，',
+        opts.structured
+            ? '并只输出结构化 JSON，不要输出任何解释或正文。'
+            : '并只输出一个 <UpdateVariable> 更新块，不要输出任何解释或正文。',
+        ...format_instructions,
+        '规则：',
+        '- 只更新「变量观察」中列出的变量；不在列表中的变量一律不要写（越权写入会被本地引擎拒绝）。',
+        '- 变量路径相对于 stat_data（如 理.好感度），JSON Patch 的 path 为 JSON Pointer（如 /理/好感度）。',
+        '- 若本轮无需更新任何变量，输出空数组：[]（structured 模式）或空块：<UpdateVariable></UpdateVariable>（文本模式）。',
         '</must>',
         '',
-        '检查结果：',
-        check_raw,
+        '最近剧情：',
+        opts.story || '（无）',
+        '',
+        '变量观察：',
+        opts.observation || '（无）',
     ];
-    if (rules.length > 0) {
-        parts.push('', '相关更新规则：', rules.join('\n---\n'));
+    if (opts.rules.length > 0) {
+        parts.push('', '相关更新规则：', opts.rules.join('\n---\n'));
     }
-    if (last_error) {
-        parts.push('', '上次输出未通过格式自检，原因：' + last_error, '请修正后重新输出。');
+    if (opts.last_error) {
+        parts.push('', '上次输出未通过本地校验，原因：' + opts.last_error, '请修正后重新输出。');
     }
     return parts.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// 结构化输出（json_schema）——对齐万花筒 §3.4 [F4] 变量请求结构化输出
+// ---------------------------------------------------------------------------
+
+const json_primitive_value_schemas = [
+    { type: 'string' },
+    { type: 'number' },
+    { type: 'integer' },
+    { type: 'boolean' },
+    { type: 'null' },
+];
+
+const json_array_item_schema = {
+    anyOf: [...json_primitive_value_schemas, { type: 'object' }, { type: 'array' }],
+};
+
+const json_value_schema = {
+    anyOf: [
+        ...json_primitive_value_schemas,
+        { type: 'object' },
+        { type: 'array', items: json_array_item_schema },
+    ],
+};
+
+const json_patch_operation_schema = {
+    anyOf: [
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['replace'] },
+                path: { type: 'string' },
+                value: json_value_schema,
+            },
+            required: ['op', 'path', 'value'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['delta'] },
+                path: { type: 'string' },
+                value: { type: 'number' },
+            },
+            required: ['op', 'path', 'value'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['insert', 'add'] },
+                path: { type: 'string' },
+                value: json_value_schema,
+            },
+            required: ['op', 'path', 'value'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['remove'] },
+                path: { type: 'string' },
+            },
+            required: ['op', 'path'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['move'] },
+                from: { type: 'string' },
+                path: { type: 'string' },
+            },
+            required: ['op', 'from', 'path'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['move'] },
+                from: { type: 'string' },
+                to: { type: 'string' },
+            },
+            required: ['op', 'from', 'to'],
+        },
+    ],
+};
+
 /**
- * 构造检查阶段 generateRaw 配置。
- * @param opts 生成选项
+ * 构造结构化输出的 JSON Schema（与 tavern-helper GenerateConfig.json_schema 兼容；
+ * ST 服务端会自动转换：OpenAI 系 → response_format.json_schema，Claude → 强制工具调用）。
+ * @returns 兼容 tavern-helper JsonSchema 形状的 schema 对象
  */
-export function buildCheckRawConfig(opts: {
-    state_text: string;
-    custom_api?: Record<string, any>;
-    max_chat_history?: number;
-    ordered_prompts?: (string | { role: string; content: string })[];
-}): Record<string, any> {
-    const ordered_prompts: (string | { role: string; content: string })[] = opts.ordered_prompts
-        ? [...opts.ordered_prompts]
-        : [];
-    // 确保任务在末尾（动态内容压尾部，利于前缀缓存）
-    ordered_prompts.push({ role: 'system', content: buildCheckTask(opts.state_text) });
-    ordered_prompts.push('user_input');
-    const config: Record<string, any> = {
-        user_input: '遵循<must>指令',
-        max_chat_history: opts.max_chat_history ?? 2,
-        should_stream: false,
-        ordered_prompts,
+export function createJsonPatchResponseSchema(): object {
+    return {
+        name: 'nlkaleido_agent_patch',
+        description:
+            'variable update structured output. Return analysis plus json_patch operations only.',
+        strict: false,
+        value: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                analysis: {
+                    type: 'string',
+                    description:
+                        'Write in ENGLISH. Compactly summarize the variable update decision without revealing variable contents.',
+                },
+                json_patch: {
+                    type: 'array',
+                    description:
+                        'MVU JsonPatch dialect operations. Use replace, delta, insert/add, remove, or move with JSON Pointer paths.',
+                    items: json_patch_operation_schema,
+                },
+            },
+            required: ['analysis', 'json_patch'],
+        },
     };
-    if (opts.custom_api) {
-        config.custom_api = opts.custom_api;
-    }
-    return config;
 }
 
 /**
  * 构造更新阶段 generateRaw 配置。
+ * 动态任务在尾部（利于前缀缓存）；不注入聊天历史占位符——
+ * 剧情上下文由桥接层显式构造并嵌入任务（对齐万花筒自构 L3 尾部）。
+ * @param opts 生成选项
  */
-export function buildUpdateRawConfig(opts: {
-    rules: string[];
-    check_raw: string;
-    last_error?: string;
+export function buildAgentUpdateRawConfig(opts: {
+    task: string;
     custom_api?: Record<string, any>;
-    max_chat_history?: number;
     ordered_prompts?: (string | { role: string; content: string })[];
+    /** 结构化输出 schema（ST 自动按 provider 转换：OpenAI → response_format，Claude → 强制工具） */
+    json_schema?: object;
 }): Record<string, any> {
     const ordered_prompts: (string | { role: string; content: string })[] = opts.ordered_prompts
         ? [...opts.ordered_prompts]
         : [];
-    ordered_prompts.push({
-        role: 'system',
-        content: buildUpdateTask(opts.rules, opts.check_raw, opts.last_error),
-    });
+    ordered_prompts.push({ role: 'system', content: opts.task });
     ordered_prompts.push('user_input');
     const config: Record<string, any> = {
         user_input: '遵循<must>指令',
-        max_chat_history: opts.max_chat_history ?? 2,
         should_stream: false,
         ordered_prompts,
     };
     if (opts.custom_api) {
         config.custom_api = opts.custom_api;
     }
+    if (opts.json_schema) {
+        config.json_schema = opts.json_schema;
+    }
     return config;
 }
 
-/** 从 generateRaw 结果中规范化出纯文本（兼容 tool_calls 形态） */
+/** 从 generateRaw 结果中规范化出纯文本（兼容 tool_calls 形态与结构化输出） */
 export function normalizeGenerateText(result: unknown): string {
     if (typeof result === 'string') return result;
     if (result && typeof result === 'object') {
         const r = result as { content?: unknown; tool_calls?: unknown };
-        // content 非空字符串才直接返回；空串继续尝试 tool_calls（Gemini 等可能 content='' + tool_calls）
+        // content 非空字符串才直接返回；空串继续尝试 tool_calls（Gemini/Claude 等可能 content='' + tool_calls）
         if (typeof r.content === 'string' && r.content.length > 0) return r.content;
         if (Array.isArray(r.tool_calls)) {
             const first = r.tool_calls[0] as { function?: { arguments?: string } } | undefined;
             if (first?.function?.arguments) {
                 try {
-                    const parsed = JSON.parse(first.function.arguments) as { delta?: string };
+                    const parsed = JSON.parse(first.function.arguments) as Record<string, unknown>;
+                    // 文本工具：delta 字段；结构化工具：json_patch 数组
                     if (typeof parsed.delta === 'string') return parsed.delta;
+                    const patch = parsed.json_patch ?? parsed.jsonPatch ?? parsed.patch;
+                    if (Array.isArray(patch)) return JSON.stringify(patch);
                 } catch {
                     /* ignore */
                 }

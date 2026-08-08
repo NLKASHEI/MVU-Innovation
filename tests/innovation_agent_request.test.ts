@@ -1,65 +1,85 @@
 import {
-    buildCheckRawConfig,
-    buildCheckTask,
-    buildUpdateRawConfig,
-    buildUpdateTask,
+    buildAgentUpdateRawConfig,
+    buildAgentUpdateTask,
+    createJsonPatchResponseSchema,
     normalizeGenerateText,
 } from '@/innovation/agent_request';
 
-describe('buildCheckTask', () => {
-    test('包含检查指令与状态', () => {
-        const task = buildCheckTask('{"a":1}');
-        expect(task).toContain('检查');
-        expect(task).toContain('不要输出任何 <UpdateVariable>');
-        expect(task).toContain('{"a":1}');
-    });
-});
-
-describe('buildUpdateTask', () => {
-    test('包含规则与检查结果', () => {
-        const task = buildUpdateTask(['rule1', 'rule2'], 'a: Y');
-        expect(task).toContain('<UpdateVariable>');
+describe('buildAgentUpdateTask', () => {
+    test('包含剧情、观察与规则', () => {
+        const task = buildAgentUpdateTask({
+            story: '剧情文本',
+            observation: '<Observation>\n- 理.好感度: 42\n</Observation>',
+            rules: ['rule1', 'rule2'],
+        });
+        expect(task).toContain('最近剧情');
+        expect(task).toContain('剧情文本');
+        expect(task).toContain('理.好感度');
         expect(task).toContain('rule1');
-        expect(task).toContain('a: Y');
+        expect(task).toContain('rule2');
     });
 
-    test('自检失败原因会被喂回', () => {
-        const task = buildUpdateTask([], 'a: Y', '更新块内没有有效更新命令');
-        expect(task).toContain('更新块内没有有效更新命令');
+    test('越权边界指令存在', () => {
+        const task = buildAgentUpdateTask({ story: '', observation: '', rules: [] });
+        expect(task).toContain('越权写入会被本地引擎拒绝');
+        expect(task).toContain('<UpdateVariable>');
+        expect(task).toContain('JSON Patch');
+    });
+
+    test('校验失败原因会被喂回', () => {
+        const task = buildAgentUpdateTask(
+            { story: '', observation: '', rules: [], last_error: '越权路径' },
+        );
+        expect(task).toContain('越权路径');
+    });
+
+    test('structured 模式要求结构化 JSON 输出', () => {
+        const task = buildAgentUpdateTask({ story: '', observation: '', rules: [], structured: true });
+        expect(task).toContain('结构化 JSON');
+        expect(task).toContain('json_patch');
+        expect(task).toContain('[]（structured 模式）');
+        expect(task).not.toContain('格式A');
     });
 });
 
-describe('buildCheckRawConfig', () => {
-    test('默认配置结构', () => {
-        const config = buildCheckRawConfig({ state_text: 'state' });
+describe('createJsonPatchResponseSchema', () => {
+    test('形状与 op 方言正确', () => {
+        const schema: any = createJsonPatchResponseSchema();
+        expect(schema.name).toBe('nlkaleido_agent_patch');
+        expect(schema.value.type).toBe('object');
+        expect(schema.value.required).toEqual(['analysis', 'json_patch']);
+        const op_any_of = schema.value.properties.json_patch.items.anyOf;
+        expect(op_any_of.length).toBe(6);
+        expect(op_any_of[1].properties.op.enum).toEqual(['delta']);
+        expect(op_any_of[0].properties.op.enum).toEqual(['replace']);
+    });
+});
+
+describe('buildAgentUpdateRawConfig', () => {
+    test('默认配置结构：任务在尾部，user_input 收尾', () => {
+        const config = buildAgentUpdateRawConfig({ task: 'TASK' });
         expect(config.user_input).toBe('遵循<must>指令');
-        expect(config.max_chat_history).toBe(2);
         expect(config.should_stream).toBe(false);
         expect(Array.isArray(config.ordered_prompts)).toBe(true);
         expect(config.ordered_prompts.at(-1)).toBe('user_input');
-        // 任务在尾部（动态内容压尾部）
-        expect(config.ordered_prompts.at(-2).content).toContain('检查');
+        // 动态任务压尾部，利于前缀缓存
+        expect(config.ordered_prompts.at(-2).content).toContain('TASK');
     });
 
     test('支持 custom_api 与自定义 ordered_prompts 前缀', () => {
-        const config = buildCheckRawConfig({
-            state_text: 's',
+        const config = buildAgentUpdateRawConfig({
+            task: 'T',
             custom_api: { apiurl: 'http://x', model: 'm' },
             ordered_prompts: ['chat_history'],
         });
         expect(config.custom_api).toEqual({ apiurl: 'http://x', model: 'm' });
         expect(config.ordered_prompts[0]).toBe('chat_history');
     });
-});
 
-describe('buildUpdateRawConfig', () => {
-    test('更新配置包含规则与检查文本', () => {
-        const config = buildUpdateRawConfig({
-            rules: ['r1'],
-            check_raw: 'a: Y',
-        });
-        expect(config.ordered_prompts.at(-2).content).toContain('r1');
-        expect(config.ordered_prompts.at(-2).content).toContain('a: Y');
+    test('支持 json_schema 结构化输出', () => {
+        const schema = createJsonPatchResponseSchema();
+        const config = buildAgentUpdateRawConfig({ task: 'T', json_schema: schema });
+        expect(config.json_schema).toBe(schema);
     });
 });
 
@@ -79,6 +99,23 @@ describe('normalizeGenerateText', () => {
             ],
         });
         expect(result).toContain('_.set');
+    });
+
+    test('tool_calls 提取结构化 json_patch 数组', () => {
+        const result = normalizeGenerateText({
+            content: '',
+            tool_calls: [
+                {
+                    type: 'function',
+                    function: {
+                        name: 'x',
+                        arguments: '{"analysis":"a","json_patch":[{"op":"replace","path":"/理/好感度","value":50}]}',
+                    },
+                },
+            ],
+        });
+        expect(result).toContain('"op":"replace"');
+        expect(result).not.toContain('json_patch');
     });
 
     test('非法输入返回空串', () => {
