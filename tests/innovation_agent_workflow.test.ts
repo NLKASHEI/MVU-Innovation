@@ -13,6 +13,7 @@ import {
     sanitizeJsonPatch,
     searchCandidates,
     validateOps,
+    verifyOpsApplied,
 } from '@/innovation/agent_workflow';
 
 const STATE = { 理: { 好感度: 42, 心情: '开心' }, 世界: { 时间: '19:30' } };
@@ -513,6 +514,42 @@ describe('validateOps（v1.12.12 只做权力边界，结构校验放行——�
             "<UpdateVariable>_.set('理.好感度', 50);\n_.set('世界.时间', '20:00');</UpdateVariable>"
         );
         expect(validateOps(prepared, STATE, ['理.好感度', '世界.时间'])).toEqual([]);
+    });
+});
+
+describe('verifyOpsApplied（应用后验证：以 MVU 后端实际结果为准，v2.0.11）', () => {
+    const backend = {
+        世界: { 当前时间: 'x', 动向: { 降临玄天: { 阶段: '起' } } },
+        主角: { 好感度: 42 },
+    };
+
+    test('写入类 op 路径在后端存在 → 通过', () => {
+        const prepared = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/世界/当前时间","value":"x"},{"op":"insert","path":"/世界/动向/降临玄天","value":{"阶段":"起"}}]</JSONPatch></UpdateVariable>'
+        );
+        expect(verifyOpsApplied(prepared, backend)).toEqual([]);
+    });
+
+    test('op 未写入后端（类型/格式被拒）→ 打回', () => {
+        // insert 字符串被 ZOD 拒绝 → 后端没有该路径 → 打回
+        const prepared = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"insert","path":"/世界/动向/荒野邂逅","value":"承 - 瑶汐"}]</JSONPatch></UpdateVariable>'
+        );
+        const errors = verifyOpsApplied(prepared, backend);
+        expect(errors.some(e => e.includes('未写入后端'))).toBe(true);
+        expect(errors.some(e => e.includes('世界.动向.荒野邂逅'))).toBe(true);
+    });
+
+    test('remove 类不验证（漏删影响小）', () => {
+        const prepared = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"remove","path":"/主角/好感度"}]</JSONPatch></UpdateVariable>'
+        );
+        // 后端 好感度 还在（remove 没生效）→ 不报错（不验证 remove）
+        expect(verifyOpsApplied(prepared, backend)).toEqual([]);
+    });
+
+    test('空 ops 通过', () => {
+        expect(verifyOpsApplied({ commands: [], patch: null }, backend)).toEqual([]);
     });
 });
 

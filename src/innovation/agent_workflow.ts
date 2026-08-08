@@ -762,6 +762,43 @@ export function parseCommands(text: string): ParsedCommand[] {
 }
 
 // ---------------------------------------------------------------------------
+// 阶段6 应用后验证：以 MVU 后端实际结果为准（v2.0.11）
+// ---------------------------------------------------------------------------
+
+/**
+ * 应用后验证（v2.0.11）：从 MVU 后端重新读取变量，逐个核对 AI 输出的 op 是否真实写入。
+ * 只验证【写入类】op（insert/add/replace/delta/set/assign）的目标路径在后端存在——
+ * 没写入（可能类型/格式不符被 ZOD/应用层拒绝）即打回；remove 类不验证（漏删影响小）。
+ * 顺序语义：验证基于最终状态（全部 op 应用后），不模拟中间态。
+ * @param prepared 校验通过的 ops
+ * @param backend 后端变量 stat_data
+ * @returns 错误列表（空 = 全部写入）
+ */
+export function verifyOpsApplied(prepared: PreparedOps, backend: unknown): string[] {
+    const errors: string[] = [];
+    if (prepared.patch) {
+        for (const op of prepared.patch) {
+            if (op.op === 'remove' || op.op === 'move') continue;
+            const dot = pointerToPath(op.path);
+            if (getPathValue(backend, dot) === undefined) {
+                errors.push(
+                    `路径 '${dot}' 未写入后端（可能类型/格式与变量结构不符，被拒绝应用）——请检查路径与值格式后重新输出`
+                );
+            }
+        }
+    }
+    for (const cmd of prepared.commands) {
+        if (cmd.type === 'remove' || cmd.type === 'unset' || cmd.type === 'delete') continue;
+        if (getPathValue(backend, cmd.path) === undefined) {
+            errors.push(
+                `路径 '${cmd.path}' 未写入后端（可能类型/格式与变量结构不符，被拒绝应用）——请检查路径与值格式后重新输出`
+            );
+        }
+    }
+    return errors;
+}
+
+// ---------------------------------------------------------------------------
 // 阶段5 校验：权力边界（§0.2 下放）
 // ---------------------------------------------------------------------------
 
@@ -1091,30 +1128,43 @@ export async function runAgentWorkflow(
                     : { ok: true };
             base.selfCheck = self_check;
 
+            // 失败（应用前校验或应用后验证）→ 喂回原因重试（连续相同失败熔断）
+            const fail_and_retry = (reason: string) => {
+                if (reason === last_failure_reason) {
+                    consecutive_failures++;
+                } else {
+                    consecutive_failures = 1;
+                    last_failure_reason = reason;
+                }
+                last_error = reason;
+                if (consecutive_failures >= loop_threshold) {
+                    return finish('loop_broken');
+                }
+                if (attempt > max_retries) {
+                    return finish('max_retries');
+                }
+                return null;
+            };
+
             if (self_check.ok) {
-                // 应用一次；无论是否实际修改，本轮回合即完成
-                await executor.apply(prepared);
+                // 应用一次
+                const applied_result = await executor.apply(prepared);
+                // 应用后验证（v2.0.11）：以 MVU 后端实际结果为准——AI 输出的 op
+                // 没有真正写入后端（可能类型/格式不符被 ZOD/应用层拒绝）→ 打回重试
+                if (applied_result.errors && applied_result.errors.length > 0) {
+                    const reason = applied_result.errors.join('；');
+                    base.selfCheck = { ok: false, reason };
+                    const retry = fail_and_retry(reason);
+                    if (retry) return retry;
+                    continue;
+                }
                 return finish('done');
             }
 
-            // 校验失败：喂回原因重试
+            // 应用前校验失败：喂回原因重试
             const reason = self_check.reason ?? '校验未通过';
-            if (reason === last_failure_reason) {
-                consecutive_failures++;
-            } else {
-                consecutive_failures = 1;
-                last_failure_reason = reason;
-            }
-            last_error = reason;
-
-            // 连续相同失败达到阈值 → 熔断
-            if (consecutive_failures >= loop_threshold) {
-                return finish('loop_broken');
-            }
-
-            if (attempt > max_retries) {
-                return finish('max_retries');
-            }
+            const retry = fail_and_retry(reason);
+            if (retry) return retry;
         }
 
         return finish('done');

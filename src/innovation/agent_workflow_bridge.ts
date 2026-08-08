@@ -22,7 +22,13 @@
  * 纯逻辑部分（请求构造/决策解析/投影/校验/工作流编排/规则分拣）均有独立单测。
  */
 
-import { parseDecidePaths, runAgentWorkflow, AgentWorkflowResult, PreparedOps } from '@/innovation/agent_workflow';
+import {
+    parseDecidePaths,
+    runAgentWorkflow,
+    verifyOpsApplied,
+    AgentWorkflowResult,
+    PreparedOps,
+} from '@/innovation/agent_workflow';
 import { isZodScript, parseZodSchemaPaths } from '@/innovation/agent_zod';
 import { createCacheMetricsState, recordCacheUsage, CacheMetricsState } from '@/innovation/cache_metrics';
 import {
@@ -1060,7 +1066,9 @@ function wrapStructuredPatch(text: string): string | null {
  * 命令方言 → 原样拼接命令文本；JSON Patch 方言 → 包 <JSONPatch> 标签。
  * 原版解释器负责 VWD/schema/display_data/事件等全部语义；返回是否实际修改。
  */
-async function applyPreparedOps(prepared: PreparedOps): Promise<{ applied: boolean }> {
+async function applyPreparedOps(
+    prepared: PreparedOps
+): Promise<{ applied: boolean; errors?: string[] }> {
     const parts: string[] = [];
     for (const cmd of prepared.commands) {
         if (cmd.fullMatch) parts.push(cmd.fullMatch);
@@ -1093,7 +1101,21 @@ async function applyPreparedOps(prepared: PreparedOps): Promise<{ applied: boole
     } catch {
         /* 刷新失败不影响变量已写入 */
     }
-    return { applied: has_variable_modified };
+    // 应用后验证（v2.0.11）：从 MVU 后端重新 get，核对 AI 输出的 op 是否真实写入——
+    // 没写入（类型/格式被 ZOD/应用层拒绝）→ errors 打回重试
+    const verify_errors: string[] = [];
+    try {
+        const backend: any = getLastValidVariable(message_id + 1);
+        if (backend && _.has(backend, 'stat_data')) {
+            verify_errors.push(...verifyOpsApplied(prepared, backend.stat_data));
+        }
+    } catch {
+        /* 验证失败不影响应用结果 */
+    }
+    return {
+        applied: has_variable_modified,
+        errors: verify_errors.length > 0 ? verify_errors : undefined,
+    };
 }
 
 /**
