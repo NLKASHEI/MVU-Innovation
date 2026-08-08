@@ -474,6 +474,40 @@ describe('validateOps（v1.12.12 只做权力边界，结构校验放行——�
         expect(errors.some(e => e.includes('缺少路径'))).toBe(true);
     });
 
+    test('record 容器新条目值必须是对象（v2.0.10 静默格式校验，动向 insert 字符串拒绝）', () => {
+        const prepared = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"insert","path":"/世界/动向/降临玄天","value":"起 - 秦海降临"}]</JSONPatch></UpdateVariable>'
+        );
+        const errors = validateOps(prepared, STATE, ['世界.动向'], ['世界.动向', '绝色榜']);
+        expect(errors.some(e => e.includes('必须是对象'))).toBe(true);
+        expect(errors.some(e => e.includes('字符串'))).toBe(true);
+    });
+
+    test('record 容器新条目值对象 → 通过', () => {
+        const prepared = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"insert","path":"/世界/动向/降临玄天","value":{"阶段":"起","类型":"机缘"}}]</JSONPatch></UpdateVariable>'
+        );
+        expect(validateOps(prepared, STATE, ['世界.动向'], ['世界.动向'])).toEqual([]);
+    });
+
+    test('record 容器本身 replace 值必须是对象（replace {} 通过，replace 数组拒绝）', () => {
+        const ok = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/世界/动向","value":{}}]</JSONPatch></UpdateVariable>'
+        );
+        expect(validateOps(ok, STATE, ['世界.动向'], ['世界.动向'])).toEqual([]);
+        const bad = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/世界/动向","value":[]}]</JSONPatch></UpdateVariable>'
+        );
+        expect(validateOps(bad, STATE, ['世界.动向'], ['世界.动向']).length).toBeGreaterThan(0);
+    });
+
+    test('record 深层子字段（如 /世界/动向/xxx/阶段）字符串不误拒', () => {
+        const prepared = parseDeltaBlock(
+            '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/世界/动向/降临玄天/阶段","value":"起"}]</JSONPatch></UpdateVariable>'
+        );
+        expect(validateOps(prepared, STATE, ['世界.动向'], ['世界.动向'])).toEqual([]);
+    });
+
     test('合法命令全部通过', () => {
         const prepared = parseDeltaBlock(
             "<UpdateVariable>_.set('理.好感度', 50);\n_.set('世界.时间', '20:00');</UpdateVariable>"

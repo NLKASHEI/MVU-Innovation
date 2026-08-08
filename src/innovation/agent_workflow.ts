@@ -781,16 +781,21 @@ export function isWithinScope(path: string, duePaths: string[]): boolean {
 
 /**
  * 校验 ops 是否允许应用（万花筒 §0.2「Agent 有推理权，没有破坏契约的权力」下放）：
- *   - v1.12.12：结构校验（路径存在性/祖先/record 键 vs 数组索引）全部放行——
- *     「能录进去就放行」由 ZOD schema（registerVariableSchema）与应用层兜底，
- *     本地正则式结构检查是重复劳动且会误杀（如先 add 空对象再 replace 填字段的初始化流程）。
- *   - 本地只保留【权力边界】：越权路径（不在本轮调度范围）拒绝 + 命令基本形状（缺路径）。
+ *   - 权力边界：越权路径（不在本轮调度范围）拒绝 + 命令基本形状（缺路径）。
+ *   - v2.0.10 静默格式校验（单一词句快速匹配 ZOD 结构）：
+ *     record 动态对象（ZOD 标记的 record 容器，如 世界.动向/绝色榜/人物）的
+ *     【新条目（容器直接子级）或容器本身】的写入值必须是对象——
+ *     模型把 record 条目写成字符串/数组（如 insert /世界/动向/xxx = "起 - ..."）时，
+ *     本地静默收集错误并喂回「请检查路径与格式后重新输出」。
+ *   - 其余（路径存在性/祖先链）仍放行——「能录进去就放行」由 ZOD 与应用层兜底。
+ * @param recordContainers ZOD record 容器路径（extractRecordFields 的键）
  * @returns 错误列表（空 = 通过）
  */
 export function validateOps(
     prepared: PreparedOps,
     _state: unknown,
-    duePaths: string[]
+    duePaths: string[],
+    recordContainers?: string[]
 ): string[] {
     const errors: string[] = [];
 
@@ -809,6 +814,38 @@ export function validateOps(
             const dot = pointerToPath(op.path);
             if (!isWithinScope(dot, duePaths)) {
                 errors.push(`越权路径 '${dot}'（不在本轮调度范围）`);
+                continue;
+            }
+            // 静默格式校验（v2.0.10）：record 容器新条目/容器本身的写入值必须是对象
+            if (
+                recordContainers &&
+                recordContainers.length > 0 &&
+                (op.op === 'insert' || op.op === 'add' || op.op === 'replace')
+            ) {
+                const is_container_itself = recordContainers.includes(dot);
+                const is_direct_child = recordContainers.some(
+                    c => dot.startsWith(c + '.') && dot.split('.').length === c.split('.').length + 1
+                );
+                if (is_container_itself || is_direct_child) {
+                    const value = op.value;
+                    const bad =
+                        value === null ||
+                        typeof value !== 'object' ||
+                        Array.isArray(value);
+                    if (bad) {
+                        const kind =
+                            value === null
+                                ? '空值 null'
+                                : typeof value === 'string'
+                                  ? '字符串'
+                                  : Array.isArray(value)
+                                    ? '数组'
+                                    : typeof value;
+                        errors.push(
+                            `record 字段 '${dot}' 的写入值必须是对象（如 {"阶段":"起","类型":"...","描述":"..."}），当前是${kind}——请检查路径与格式后重新输出`
+                        );
+                    }
+                }
             }
         }
     }
@@ -1040,7 +1077,14 @@ export async function runAgentWorkflow(
                 return finish('done');
             }
 
-            const validation_errors = validateOps(prepared, input.state, due);
+            // 静默格式校验：record 容器（ZOD 标记）新条目值必须是对象（v2.0.10）
+            const record_containers = Object.keys(extractRecordFields(rules.zodPaths ?? []));
+            const validation_errors = validateOps(
+                prepared,
+                input.state,
+                due,
+                record_containers.length > 0 ? record_containers : undefined
+            );
             const self_check: SelfCheckResult =
                 validation_errors.length > 0
                     ? { ok: false, reason: validation_errors.join('；') }
