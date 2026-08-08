@@ -47,20 +47,24 @@ export interface WorldbookRulesResult {
 /** 默认单条内容截断长度 */
 export const DEFAULT_MAX_ENTRY_LENGTH = 8000;
 
+/** 条目标记判定文本（name + content——卡作者常把 [mvu_update] 标记写在条目标题里） */
+function entryMarkupText(entry: WorldbookEntryLike): string {
+    return `${String(entry.name ?? '')}\n${String(entry.content ?? '')}`;
+}
+
 /**
  * 判断条目是否为更新规则条目。
+ * 只认 [mvu_update] 标记（name 或 content）；无标记的一律视为背景（候选待启发）。
  */
 export function isUpdateRuleEntry(entry: WorldbookEntryLike): boolean {
-    const content = String(entry.content ?? '');
-    return INNOVATION_UPDATE_REGEX.test(content);
+    return INNOVATION_UPDATE_REGEX.test(entryMarkupText(entry));
 }
 
 /**
  * 判断条目是否为剧情条目（本阶段应排除）。
  */
 export function isPlotEntry(entry: WorldbookEntryLike): boolean {
-    const content = String(entry.content ?? '');
-    return INNOVATION_PLOT_REGEX.test(content);
+    return INNOVATION_PLOT_REGEX.test(entryMarkupText(entry));
 }
 
 /**

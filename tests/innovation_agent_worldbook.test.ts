@@ -21,6 +21,15 @@ describe('isUpdateRuleEntry / isPlotEntry', () => {
         expect(isUpdateRuleEntry(update_entry('普通条目'))).toBe(false);
     });
 
+    test('标记写在条目标题（name）也能识别（v1.11.1 修复）', () => {
+        expect(isUpdateRuleEntry({ name: '[mvu_update] 好感度规则', content: '每天更新', enabled: true })).toBe(true);
+        expect(isPlotEntry({ name: '[mvu_plot] 森林传说', content: '背景', enabled: true })).toBe(true);
+    });
+
+    test('名字叫「规则」但无标记的背景不算规则（v1.11.1 修复）', () => {
+        expect(isUpdateRuleEntry({ name: '规则', content: '森林的传说背景', enabled: true })).toBe(false);
+    });
+
     test('识别 [mvu_plot]', () => {
         expect(isPlotEntry(update_entry('[mvu_plot] 剧情'))).toBe(true);
         expect(isPlotEntry(update_entry('普通'))).toBe(false);

@@ -2,12 +2,22 @@ import { isExtraModelSupported } from '@/function/is_extra_model_supported';
 import { isFunctionCallingSupported } from '@/function/is_function_calling_supported';
 import { invokeExtraModelWithStrategy } from '@/function/update/invoke_extra_model';
 import { handleVariablesInMessage } from '@/function/update_variables';
+import { loadInnovationSettings } from '@/innovation/settings';
 import { useDataStore } from '@/store';
 
 export async function onMessageReceived(
     message_id: number,
     { force = false }: { force?: boolean } = {}
 ) {
+    // [革新版接管] Agent 工作流开启时，原版额外模型解析/随AI输出链路整体跳过：
+    // 革新版自己监听 MESSAGE_RECEIVED 执行 agent 工作流（决策→拉取→观察→更新→校验），
+    // 避免两条链路同时跑（原版找不到 <UpdateVariable> 标签报错 + 变量双写）。
+    // 原版的「依次请求失败后重试」循环也随之不再触发（革新版有独立的失败喂回重试）。
+    if (loadInnovationSettings(localStorage).agentEnabled) {
+        console.debug('[MVU] 革新版 Agent 已接管更新链路，跳过原版额外模型解析');
+        return;
+    }
+
     const current_chatmsg = getChatMessages(message_id).at(-1);
     if (!current_chatmsg) {
         return;
