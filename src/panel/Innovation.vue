@@ -172,6 +172,11 @@
                                     <pre class="nlkaleido-debug-pre nlkaleido-debug-full">{{
                                         entry.decide.fullRaw
                                     }}</pre>
+                                    <p class="nlkaleido-debug-line">
+                                        注：更新轮完整输入会包含本轮的完整消息（多轮上下文连贯机制，
+                                        API 无状态必须携带历史）；实际计费靠 provider 前缀缓存只算增量
+                                        （见上方「革新版 Agent 调用」命中率）。
+                                    </p>
                                 </div>
                             </div>
                             <p v-if="entry.worldbook" class="nlkaleido-debug-line">

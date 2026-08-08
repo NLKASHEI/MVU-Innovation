@@ -74,7 +74,9 @@ export function buildDecideMessages(opts: {
 /**
  * 第二轮【更新】消息：在同一对话里续——正文已在第一轮上下文，不重复喂。
  *   assistant = 第一轮的决策输出；system = 更新任务指令（结构化/文本格式）；
- *   user = 观察投影 + 相关规则 + 相关背景 + 上一轮更新情况（启发式构建的背景）。
+ *   user = 观察投影 + 相关规则 + 相关背景（启发式构建的背景在此轮追加）。
+ * 注意：不重复注入「上一轮更新情况」（lastRound）——它已在第一轮 user 消息里，
+ * 而本轮 messages 包含第一轮全部消息，再带一遍就是真重复（v2.0.2 修复）。
  */
 export function buildUpdateMessages(opts: {
     prev: ChatMessage[];
@@ -82,7 +84,6 @@ export function buildUpdateMessages(opts: {
     observation: string;
     rules: string[];
     lore?: string[];
-    lastRound?: string;
     last_error?: string;
     /** 结构化输出模式（配合 json_schema）：要求模型输出 {analysis, json_patch} JSON */
     structured?: boolean;
@@ -129,9 +130,7 @@ export function buildUpdateMessages(opts: {
     if (opts.lore && opts.lore.length > 0) {
         user_parts.push('', '相关世界书背景（理解世界用，不是更新规则）：', opts.lore.join('\n---\n'));
     }
-    if (opts.lastRound) {
-        user_parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
-    }
+    // 不重复注入 lastRound（已在第一轮 user 消息里，本轮 messages 包含第一轮全部）
     if (opts.last_error) {
         user_parts.push('', '上次输出未通过本地校验，原因：' + opts.last_error, '请修正后重新输出。');
     }

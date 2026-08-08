@@ -1231,10 +1231,10 @@ export async function runAgentWorkflowForMessage(
             entry.worldbook = state.scan;
             const rules = poolQueryRulesByPaths(state.pool, paths);
             const lore = poolQueryLoreByPaths(state.pool, lorePaths ?? paths, story, {
-                // 预算收紧（v2.0.1）：背景 7 条人物详情 ≈6000 字符每轮全量重发太肥
-                maxEntries: 6,
-                maxTotalChars: 4000,
-                maxEntryLength: 800,
+                // 背景按需给足（v2.0.2 恢复预算——收紧是倒退，世界观背景该给就给）
+                maxEntries: 10,
+                maxTotalChars: 6000,
+                maxEntryLength: 1000,
             });
             entry.loreCount = lore.length;
             return {
@@ -1274,7 +1274,6 @@ export async function runAgentWorkflowForMessage(
                     observation: ctx.observation,
                     rules: ctx.rules,
                     lore: ctx.lore,
-                    lastRound: last_round_summary ?? undefined,
                     last_error,
                     structured: true,
                 });
@@ -1299,7 +1298,6 @@ export async function runAgentWorkflowForMessage(
                     observation: ctx.observation,
                     rules: ctx.rules,
                     lore: ctx.lore,
-                    lastRound: last_round_summary ?? undefined,
                     last_error,
                 });
                 const fallback_config = buildMessagesRawConfig({
