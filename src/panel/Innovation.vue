@@ -45,15 +45,16 @@
                 </div>
             </Detail>
 
-            <Detail title="最近 Agent 循环">
-                <div v-if="lastLoop" class="nlkaleido-loop-result">
-                    <span>步数 <b>{{ lastLoop.steps.length }}</b></span>
-                    <span>终止原因 <b>{{ lastLoop.termination }}</b></span>
-                    <span v-if="lastLoop.loop_broken" class="nlkaleido-warn">
-                        死循环已熔断
+            <Detail title="最近 Agent 工作流">
+                <div v-if="lastWorkflow" class="nlkaleido-loop-result">
+                    <span>阶段 <b>{{ lastWorkflow.stages.join(' → ') || '（无）' }}</b></span>
+                    <span>终止 <b>{{ lastWorkflow.termination }}</b></span>
+                    <span v-if="lastWorkflow.retries > 0">自检重试 <b>{{ lastWorkflow.retries }}</b> 次</span>
+                    <span v-if="lastWorkflow.error" class="nlkaleido-warn">
+                        错误：{{ lastWorkflow.error }}
                     </span>
                 </div>
-                <p v-else class="nlkaleido-tip">尚无循环记录（开启 Agent 后产生）。</p>
+                <p v-else class="nlkaleido-tip">尚无工作流记录（开启 Agent 并发送消息后产生）。</p>
             </Detail>
 
             <Detail title="版本与更新">
@@ -99,7 +100,7 @@ import Field from '@/panel/component/Field.vue';
 import RangeNumber from '@/panel/component/RangeNumber.vue';
 import Section from '@/panel/component/Section.vue';
 import { getCacheMetricsState } from '@/innovation/cache_metrics_bridge';
-import { getLastAgentLoopResult } from '@/innovation/agent_update_bridge';
+import { getLastWorkflowResult } from '@/innovation/agent_workflow_bridge';
 import {
     checkForUpdatesNow,
     getLastUpdateCheck,
@@ -123,7 +124,7 @@ watch(
 );
 
 const cacheMetrics = ref(getCacheMetricsState());
-const lastLoop = ref(getLastAgentLoopResult());
+const lastWorkflow = ref(getLastWorkflowResult());
 const cacheRateText = computed(() => {
     const total = cacheMetrics.value.hitTokens + cacheMetrics.value.missTokens;
     if (total <= 0) return 'N/A';
@@ -149,11 +150,11 @@ async function onCopyUpdateUrl() {
     }
 }
 
-// 周期性刷新缓存度量与循环状态
+// 周期性刷新缓存度量与工作流状态
 const timer = setInterval(() => {
     cacheMetrics.value = getCacheMetricsState();
-    lastLoop.value = getLastAgentLoopResult();
-}, 3000);
+    lastWorkflow.value = getLastWorkflowResult();
+}, 2000);
 
 onUnmounted(() => {
     clearInterval(timer);
