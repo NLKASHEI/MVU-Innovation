@@ -1,200 +1,124 @@
 import {
-    buildAgentUpdateRawConfig,
-    buildAgentUpdateTask,
-    buildDecideRawConfig,
-    buildDecideTask,
+    buildDecideMessages,
+    buildMessagesRawConfig,
+    buildUpdateMessages,
     createJsonPatchResponseSchema,
     normalizeGenerateText,
-    squashStory,
 } from '@/innovation/agent_request';
 
-describe('squashStory（剧情压缩，万花筒 §5.4 L3 squash 下放）', () => {
-    test('相邻同发件人消息合并去重前缀', () => {
-        const story = '角色A：第一句\n角色A：第二句\n角色B：另一句';
-        const out = squashStory(story);
-        expect(out).toContain('角色A：第一句 第二句');
-        expect(out).not.toContain('角色A：第二句\n');
-        expect(out).toContain('角色B：另一句');
-    });
-
-    test('截断到上限', () => {
-        const story = '角色A：' + 'x'.repeat(500);
-        const out = squashStory(story, 200);
-        expect(out.length).toBeLessThanOrEqual(210);
-        expect(out).toContain('剧情压缩截断');
-    });
-
-    test('不同发件人不合并，空输入返回空', () => {
-        const story = 'A：1\nB：2\nA：3';
-        expect(squashStory(story)).toBe('A：1\nB：2\nA：3');
-        expect(squashStory('')).toBe('');
-    });
-});
-
-describe('buildDecideTask', () => {
-    test('包含剧情、候选清单与决策指令', () => {
-        const task = buildDecideTask({ story: '剧情文本', candidates: ['理.好感度', '世界.时间'] });
-        expect(task).toContain('最近剧情');
-        expect(task).toContain('剧情文本');
-        expect(task).toContain('候选清单');
-        expect(task).toContain('理.好感度');
-        expect(task).toContain('世界.时间');
-        expect(task).toContain('none');
-    });
-
-    test('必须逐项判断（防偷懒）', () => {
-        const task = buildDecideTask({ story: '', candidates: ['a.b'] });
-        expect(task).toContain('逐项判断，不得省略任何一行');
-        expect(task).toContain('路径: Y');
-        expect(task).toContain('路径: N');
-    });
-
-    test('禁止写候选外路径与更新块', () => {
-        const task = buildDecideTask({ story: '', candidates: ['a.b'] });
-        expect(task).toContain('候选清单之外的路径');
-        expect(task).toContain('不要输出 <UpdateVariable> 更新块');
+describe('buildDecideMessages（第一轮：完整正文喂入）', () => {
+    test('system 固定任务 + user 完整正文/候选清单', () => {
+        const messages = buildDecideMessages({
+            story: '剧情文本',
+            candidates: ['理.好感度', '世界.时间'],
+        });
+        expect(messages).toHaveLength(2);
+        expect(messages[0].role).toBe('system');
+        expect(messages[0].content).toContain('逐项判断，不得省略任何一行');
+        expect(messages[0].content).toContain('none');
+        expect(messages[1].role).toBe('user');
+        expect(messages[1].content).toContain('最近剧情');
+        expect(messages[1].content).toContain('剧情文本');
+        expect(messages[1].content).toContain('理.好感度');
     });
 
     test('强制更新路径标注 MANDATORY（防偷懒）', () => {
-        const task = buildDecideTask({
+        const messages = buildDecideMessages({
             story: '',
             candidates: ['世界.绝色榜', '主角.修为'],
             mandatory: ['世界.绝色榜'],
         });
-        expect(task).toContain('世界.绝色榜  ← MANDATORY：必须更新，不得输出 N');
-        expect(task).not.toContain('主角.修为  ←');
+        expect(messages[1].content).toContain('世界.绝色榜  ← MANDATORY：必须更新，不得输出 N');
+        expect(messages[1].content).not.toContain('主角.修为  ←');
     });
 
-    test('跨轮上下文（上一轮更新情况）注入', () => {
-        const task = buildDecideTask({
+    test('跨轮上下文（上一轮更新情况）与失败原因注入 user', () => {
+        const messages = buildDecideMessages({
             story: '',
             candidates: ['a.b'],
             lastRound: '更新了 1 个变量：a.b',
+            last_error: '决策路径不存在',
         });
-        expect(task).toContain('上一轮更新情况');
-        expect(task).toContain('更新了 1 个变量：a.b');
-        const update_task = buildAgentUpdateTask({
-            story: '',
-            observation: '',
-            rules: [],
-            lastRound: '上轮无实际更新',
-        });
-        expect(update_task).toContain('上一轮更新情况');
-    });
-
-    test('失败原因会被喂回', () => {
-        const task = buildDecideTask({ story: '', candidates: [], last_error: '决策路径不存在' });
-        expect(task).toContain('决策路径不存在');
+        expect(messages[1].content).toContain('上一轮更新情况');
+        expect(messages[1].content).toContain('更新了 1 个变量：a.b');
+        expect(messages[1].content).toContain('决策路径不存在');
     });
 });
 
-describe('buildDecideRawConfig', () => {
-    test('默认配置结构：任务在尾部，user_input 收尾，限 max_tokens', () => {
-        const config = buildDecideRawConfig({ task: 'TASK' });
-        expect(config.user_input).toBe('遵循<must>指令');
-        expect(config.should_stream).toBe(false);
-        expect(config.max_tokens).toBe(500);
-        expect(config.ordered_prompts.at(-1)).toBe('user_input');
-        expect(config.ordered_prompts.at(-2).content).toContain('TASK');
-    });
+describe('buildUpdateMessages（第二轮：同一对话里续，不重复喂正文）', () => {
+    const prev = buildDecideMessages({ story: '剧情文本', candidates: ['理.好感度'] });
 
-    test('支持 custom_api 与自定义 ordered_prompts 前缀', () => {
-        const config = buildDecideRawConfig({
-            task: 'T',
-            custom_api: { apiurl: 'http://x' },
-            ordered_prompts: ['chat_history'],
-        });
-        expect(config.custom_api).toEqual({ apiurl: 'http://x' });
-        expect(config.ordered_prompts[0]).toBe('chat_history');
-    });
-});
-
-describe('buildAgentUpdateTask', () => {
-    test('包含剧情、观察与规则', () => {
-        const task = buildAgentUpdateTask({
-            story: '剧情文本',
+    test('消息序列：第一轮 + assistant 决策输出 + system 更新任务 + user 观察/规则/背景', () => {
+        const messages = buildUpdateMessages({
+            prev,
+            decideOutput: '理.好感度: Y',
             observation: '<Observation>\n- 理.好感度: 42\n</Observation>',
-            rules: ['rule1', 'rule2'],
-        });
-        expect(task).toContain('最近剧情');
-        expect(task).toContain('剧情文本');
-        expect(task).toContain('理.好感度');
-        expect(task).toContain('rule1');
-        expect(task).toContain('rule2');
-    });
-
-    test('越权边界指令存在', () => {
-        const task = buildAgentUpdateTask({ story: '', observation: '', rules: [] });
-        expect(task).toContain('越权写入会被本地引擎拒绝');
-        expect(task).toContain('<UpdateVariable>');
-        expect(task).toContain('JSON Patch');
-    });
-
-    test('校验失败原因会被喂回', () => {
-        const task = buildAgentUpdateTask(
-            { story: '', observation: '', rules: [], last_error: '越权路径' },
-        );
-        expect(task).toContain('越权路径');
-    });
-
-    test('包含相关世界书背景（世界书读了再读更新规则）', () => {
-        const task = buildAgentUpdateTask({
-            story: '',
-            observation: '',
             rules: ['rule1'],
             lore: ['森林的传说：好感度神圣'],
         });
-        expect(task).toContain('相关世界书背景');
-        expect(task).toContain('森林的传说：好感度神圣');
+        expect(messages.length).toBe(prev.length + 3);
+        // 上下文延续：第一轮的 user 剧情还在消息里，但更新轮【不新增】剧情内容
+        expect(messages[0].content).toContain('逐项判断');
+        expect(messages[1].content).toContain('剧情文本');
+        // assistant 携带决策输出
+        expect(messages[2].role).toBe('assistant');
+        expect(messages[2].content).toBe('理.好感度: Y');
+        // system 更新任务明确说明剧情已在上下文
+        expect(messages[3].role).toBe('system');
+        expect(messages[3].content).toContain('剧情已在上下文中，不要重复阅读或复述剧情');
+        // user 观察/规则/背景（启发式构建的背景在此轮追加）
+        expect(messages[4].role).toBe('user');
+        expect(messages[4].content).toContain('理.好感度: 42');
+        expect(messages[4].content).toContain('rule1');
+        expect(messages[4].content).toContain('森林的传说：好感度神圣');
     });
 
-    test('structured 模式要求结构化 JSON 输出', () => {
-        const task = buildAgentUpdateTask({ story: '', observation: '', rules: [], structured: true });
-        expect(task).toContain('结构化 JSON');
-        expect(task).toContain('json_patch');
-        expect(task).toContain('[]（structured 模式）');
-        expect(task).not.toContain('格式A');
-    });
-});
-
-describe('createJsonPatchResponseSchema', () => {
-    test('形状与 op 方言正确', () => {
-        const schema: any = createJsonPatchResponseSchema();
-        expect(schema.name).toBe('nlkaleido_agent_patch');
-        expect(schema.value.type).toBe('object');
-        expect(schema.value.required).toEqual(['analysis', 'json_patch']);
-        const op_any_of = schema.value.properties.json_patch.items.anyOf;
-        expect(op_any_of.length).toBe(6);
-        expect(op_any_of[1].properties.op.enum).toEqual(['delta']);
-        expect(op_any_of[0].properties.op.enum).toEqual(['replace']);
-    });
-});
-
-describe('buildAgentUpdateRawConfig', () => {
-    test('默认配置结构：任务在尾部，user_input 收尾，限 max_tokens', () => {
-        const config = buildAgentUpdateRawConfig({ task: 'TASK' });
-        expect(config.user_input).toBe('遵循<must>指令');
-        expect(config.should_stream).toBe(false);
-        expect(config.max_tokens).toBe(3000);
-        expect(Array.isArray(config.ordered_prompts)).toBe(true);
-        expect(config.ordered_prompts.at(-1)).toBe('user_input');
-        // 动态任务压尾部，利于前缀缓存
-        expect(config.ordered_prompts.at(-2).content).toContain('TASK');
-    });
-
-    test('支持 custom_api 与自定义 ordered_prompts 前缀', () => {
-        const config = buildAgentUpdateRawConfig({
-            task: 'T',
-            custom_api: { apiurl: 'http://x', model: 'm' },
-            ordered_prompts: ['chat_history'],
+    test('结构化模式要求 JSON 输出', () => {
+        const messages = buildUpdateMessages({
+            prev,
+            decideOutput: 'x',
+            observation: '',
+            rules: [],
+            structured: true,
         });
-        expect(config.custom_api).toEqual({ apiurl: 'http://x', model: 'm' });
-        expect(config.ordered_prompts[0]).toBe('chat_history');
+        expect(messages[3].content).toContain('结构化 JSON');
+        expect(messages[3].content).toContain('json_patch');
+        expect(messages[3].content).not.toContain('格式A');
     });
 
-    test('支持 json_schema 结构化输出', () => {
+    test('越权边界与失败原因喂回', () => {
+        const messages = buildUpdateMessages({
+            prev,
+            decideOutput: 'x',
+            observation: '',
+            rules: [],
+            last_error: '越权路径',
+        });
+        expect(messages[3].content).toContain('越权写入会被本地引擎拒绝');
+        expect(messages[4].content).toContain('越权路径');
+    });
+});
+
+describe('buildMessagesRawConfig（多轮消息 → generateRaw 配置）', () => {
+    test('ordered_prompts 为消息序列，末尾 user 触发生成', () => {
+        const messages = buildDecideMessages({ story: 's', candidates: ['a.b'] });
+        const config = buildMessagesRawConfig({ messages, max_tokens: 500 });
+        expect(config.should_stream).toBe(false);
+        expect(config.max_tokens).toBe(500);
+        expect(config.ordered_prompts).toHaveLength(2);
+        expect(config.ordered_prompts[0]).toEqual({ role: 'system', content: expect.any(String) });
+        expect(config.ordered_prompts[1]).toEqual({ role: 'user', content: expect.any(String) });
+        expect(config.ordered_prompts.at(-1).role).toBe('user');
+    });
+
+    test('支持 custom_api 与 json_schema', () => {
         const schema = createJsonPatchResponseSchema();
-        const config = buildAgentUpdateRawConfig({ task: 'T', json_schema: schema });
+        const config = buildMessagesRawConfig({
+            messages: buildDecideMessages({ story: '', candidates: [] }),
+            custom_api: { apiurl: 'http://x' },
+            json_schema: schema,
+        });
+        expect(config.custom_api).toEqual({ apiurl: 'http://x' });
         expect(config.json_schema).toBe(schema);
     });
 });

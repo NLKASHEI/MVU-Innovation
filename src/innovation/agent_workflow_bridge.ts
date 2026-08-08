@@ -30,15 +30,16 @@ import {
 } from '@/innovation/agent_workflow';
 import { isZodScript, parseZodSchemaPaths } from '@/innovation/agent_zod';
 import {
-    buildAgentUpdateRawConfig,
-    buildAgentUpdateTask,
+    buildDecideMessages,
+    buildMessagesRawConfig,
+    buildUpdateMessages,
     buildDecideRawConfig,
-    buildDecideTask,
     createAiClassifySchema,
     createJsonPatchResponseSchema,
-    DECIDE_STORY_MAX,
+    ChatMessage,
+    DECIDE_MAX_TOKENS,
     normalizeGenerateText,
-    squashStory,
+    UPDATE_MAX_TOKENS,
 } from '@/innovation/agent_request';
 import {
     pickUpdateWorldbookNames,
@@ -1051,6 +1052,9 @@ export async function runAgentWorkflowForMessage(
     const story = extractRecentStory(message_id);
     // 自定义额外模型配置（可选；缺省用当前插头）
     const custom_api: Record<string, any> | undefined = undefined;
+    // 多轮对话上下文：第一轮（决策）消息序列 + 决策输出——第二轮（更新）在同一对话里续
+    let round_messages: ChatMessage[] = [];
+    let decide_output: string | null = null;
 
     // ---- 调试日志载体 ----
     const entry: WorkflowDebugEntry = {
@@ -1105,26 +1109,30 @@ export async function runAgentWorkflowForMessage(
                 mandatoryPaths: state.pool.mandatoryPaths,
             };
         },
-        // 阶段2 AI 决策：对启发式候选清单逐项 Y/N 判断（防偷懒 + 强制更新 + 跨轮上下文）。
-        // 决策用【压缩剧情】（相邻消息合并 + 截断 4000）——判断「发生了什么」足够，
-        // 不再与更新阶段重复喂同一份完整 6000 字符剧情（万花筒 §5.4 L3 squash 下放）。
+        // 阶段2 AI 决策（第一轮，喂完整正文）：对启发式候选清单逐项 Y/N 判断。
+        // 记录本轮消息序列（round_messages）——第二轮更新在同一对话里续，正文不重复喂。
         decide: async (
             input: { story: string; candidates: string[]; mandatory?: string[] },
             last_error?: string
         ) => {
             const call_started = Date.now();
-            const task = buildDecideTask({
-                story: squashStory(input.story, DECIDE_STORY_MAX),
+            round_messages = buildDecideMessages({
+                story: input.story,
                 candidates: input.candidates,
                 mandatory: input.mandatory,
-                lastRound: last_round_summary,
+                lastRound: last_round_summary ?? undefined,
                 last_error,
             });
-            const config = buildDecideRawConfig({ task, custom_api });
+            const config = buildMessagesRawConfig({
+                messages: round_messages,
+                custom_api,
+                max_tokens: DECIDE_MAX_TOKENS,
+            });
             const text = normalizeGenerateText(await generateRaw(config));
+            decide_output = text;
             entry.decide = {
                 text_preview: preview(text, PREVIEW_TEXT),
-                fullTask: task,
+                fullTask: round_messages.map(m => `${m.role}：${m.content}`).join('\n\n'),
                 fullRaw: text,
                 parsed_count: parseDecidePaths(text, input.candidates).length,
                 duration_ms: Date.now() - call_started,
@@ -1151,45 +1159,49 @@ export async function runAgentWorkflowForMessage(
                 lore,
             };
         },
-        // 阶段4 一步 agent 回合：基于（剧情+观察+规则+背景）产出 delta。
-        // 首选结构化输出（json_schema，ST 自动按 provider 转换：OpenAI → response_format，
-        // Claude → 强制工具调用）；provider 不支持时降级纯文本指令。
+        // 阶段4 一步 agent 回合（第二轮，同一对话里续）：基于（上一轮决策 + 观察 + 规则 + 背景）
+        // 产出 delta——正文在第一轮上下文里，不重复喂；启发式构建的背景在此轮追加。
+        // 首选结构化输出（json_schema）；provider 不支持时降级纯文本指令。
         update: async (ctx: { story: string; observation: string; rules: string[]; lore: string[] }, last_error?: string) => {
             const attempt = entry.updates.length + 1;
             const call_started = Date.now();
             let structured = true;
             let result: unknown;
-            let task = '';
+            let messages: ChatMessage[] = [];
             try {
-                task = buildAgentUpdateTask({
-                    story: ctx.story,
+                messages = buildUpdateMessages({
+                    prev: round_messages,
+                    decideOutput: decide_output ?? '',
                     observation: ctx.observation,
                     rules: ctx.rules,
                     lore: ctx.lore,
-                    lastRound: last_round_summary,
+                    lastRound: last_round_summary ?? undefined,
                     last_error,
                     structured: true,
                 });
-                const config = buildAgentUpdateRawConfig({
-                    task,
+                const config = buildMessagesRawConfig({
+                    messages,
                     custom_api,
                     json_schema: createJsonPatchResponseSchema(),
+                    max_tokens: UPDATE_MAX_TOKENS,
                 });
                 result = await generateRaw(config);
             } catch {
-                // 降级：纯文本指令（模型输出 <UpdateVariable> 块）
+                // 降级：同消息去 json_schema（模型输出 <UpdateVariable> 块）
                 structured = false;
-                task = buildAgentUpdateTask({
-                    story: ctx.story,
+                messages = buildUpdateMessages({
+                    prev: round_messages,
+                    decideOutput: decide_output ?? '',
                     observation: ctx.observation,
                     rules: ctx.rules,
                     lore: ctx.lore,
-                    lastRound: last_round_summary,
+                    lastRound: last_round_summary ?? undefined,
                     last_error,
                 });
-                const fallback_config = buildAgentUpdateRawConfig({
-                    task,
+                const fallback_config = buildMessagesRawConfig({
+                    messages,
                     custom_api,
+                    max_tokens: UPDATE_MAX_TOKENS,
                 });
                 result = await generateRaw(fallback_config);
             }
@@ -1201,7 +1213,7 @@ export async function runAgentWorkflowForMessage(
                 structured,
                 block_preview: preview(block, PREVIEW_BLOCK),
                 raw_preview: preview(text, PREVIEW_RAW),
-                fullTask: task,
+                fullTask: messages.map(m => `${m.role}：${m.content}`).join('\n\n'),
                 fullRaw: text,
                 duration_ms: Date.now() - call_started,
                 fed_error: last_error,

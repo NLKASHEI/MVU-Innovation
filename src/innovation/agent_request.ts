@@ -14,53 +14,27 @@
  * 纯逻辑零依赖（只拼字符串/对象），可独立单测。
  */
 
+/** 对话消息（多轮上下文：第一次喂完整正文出决策，第二次在同一对话里续——不重复喂正文） */
+export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
+/** 决策阶段输出 token 上限（候选逐项 Y/N，几十到几百字符） */
+export const DECIDE_MAX_TOKENS = 500;
+/** 更新阶段输出 token 上限（JSON Patch 数组，18 个 op 含大 insert 约 2-3k token） */
+export const UPDATE_MAX_TOKENS = 3000;
+
 /**
- * 剧情压缩（对齐万花筒 §5.4 L3 最近剧情 squash，G7 下放）：
- * 相邻同发件人消息合并（去重复角色名前缀）后截断。
- * 用途：决策阶段只判断「发生了什么 → 哪些变量相关」，用压缩剧情即可；
- * 更新阶段算新值才用完整剧情——两次调用不再重复喂同一份 6000 字符。
+ * 第一轮【决策】消息：
+ *   system = 固定任务指令（前缀稳定，利于缓存）；user = 完整正文 + 上一轮情况 + 候选清单（动态尾部）。
+ * 完整正文只在这一轮喂——第二轮更新在同一对话里续，正文在上下文里，不重复喂。
  */
-export function squashStory(story: string, maxChars: number = 4000): string {
-    if (!story) return '';
-    const lines = String(story).split('\n');
-    const merged: string[] = [];
-    for (const line of lines) {
-        const m = line.match(/^([^:：]{1,30})[:：]\s*(.*)$/);
-        if (m) {
-            const name = m[1];
-            const content = m[2];
-            const last = merged[merged.length - 1];
-            const lastM = last?.match(/^([^:：]{1,30})[:：]\s*(.*)$/);
-            if (lastM && lastM[1] === name) {
-                merged[merged.length - 1] = `${name}：${lastM[2]} ${content}`;
-                continue;
-            }
-            merged.push(line);
-        } else {
-            merged.push(line);
-        }
-    }
-    let text = merged.join('\n');
-    if (text.length > maxChars) {
-        text = text.slice(0, maxChars) + '\n…（剧情压缩截断）';
-    }
-    return text;
-}
-
-/** 决策阶段剧情上限（压缩版，判断相关性足够） */
-export const DECIDE_STORY_MAX = 4000;
-/** 更新阶段剧情上限（完整版，算新值需要细节） */
-export const UPDATE_STORY_MAX = 6000;
-
-/** 决策阶段提示词：对启发式候选清单逐项 Y/N 判断（防偷懒 + 强制更新 + 跨轮上下文） */
-export function buildDecideTask(opts: {
+export function buildDecideMessages(opts: {
     story: string;
     candidates: string[];
     mandatory?: string[];
     lastRound?: string;
     last_error?: string;
-}): string {
-    const parts = [
+}): ChatMessage[] {
+    const system_parts = [
         '<must>',
         '你是变量更新 Agent。先执行【决策】阶段：基于最近剧情，判断候选清单中的哪些变量需要更新。',
         '候选清单是本地启发式筛选出的「可能与剧情相关」的变量。',
@@ -73,32 +47,119 @@ export function buildDecideTask(opts: {
         '- 不要写候选清单之外的路径（越权写入会被本地引擎拒绝）。',
         '- 不要输出解释，不要输出 <UpdateVariable> 更新块。',
         '</must>',
-        '',
-        '最近剧情：',
-        opts.story || '（无）',
-    ];
+    ].join('\n');
+    const user_parts = ['最近剧情：', opts.story || '（无）'];
     if (opts.lastRound) {
-        parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
+        user_parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
     }
-    parts.push('', '候选清单（必须逐项判断）：');
+    user_parts.push('', '候选清单（必须逐项判断）：');
     if (opts.candidates.length > 0) {
         for (const path of opts.candidates) {
             const mark = opts.mandatory?.includes(path) ? '  ← MANDATORY：必须更新，不得输出 N' : '';
-            parts.push(`- ${path}${mark}`);
+            user_parts.push(`- ${path}${mark}`);
         }
     } else {
-        parts.push('（无）');
+        user_parts.push('（无）');
     }
     if (opts.last_error) {
-        parts.push('', '上次决策未通过校验，原因：' + opts.last_error, '请修正后重新输出。');
+        user_parts.push('', '上次决策未通过校验，原因：' + opts.last_error, '请修正后重新输出。');
     }
-    return parts.join('\n');
+    return [
+        { role: 'system', content: system_parts },
+        { role: 'user', content: user_parts.join('\n') },
+    ];
 }
 
-/** 决策阶段输出 token 上限（只输出需要更新的路径，几十个字符即可） */
-export const DECIDE_MAX_TOKENS = 500;
-/** 更新阶段输出 token 上限（JSON Patch 数组，9 个变量约 1-2k token） */
-export const UPDATE_MAX_TOKENS = 3000;
+/**
+ * 第二轮【更新】消息：在同一对话里续——正文已在第一轮上下文，不重复喂。
+ *   assistant = 第一轮的决策输出；system = 更新任务指令（结构化/文本格式）；
+ *   user = 观察投影 + 相关规则 + 相关背景 + 上一轮更新情况（启发式构建的背景）。
+ */
+export function buildUpdateMessages(opts: {
+    prev: ChatMessage[];
+    decideOutput: string;
+    observation: string;
+    rules: string[];
+    lore?: string[];
+    lastRound?: string;
+    last_error?: string;
+    /** 结构化输出模式（配合 json_schema）：要求模型输出 {analysis, json_patch} JSON */
+    structured?: boolean;
+}): ChatMessage[] {
+    const format_instructions = opts.structured
+        ? [
+              '你必须以结构化 JSON 输出（不要 <UpdateVariable> 标签、不要解释）：',
+              '  {"analysis": "英文简要推理", "json_patch": [{"op":"replace","path":"/理/好感度","value":50}]}',
+              'json_patch 的 op 支持 replace/delta/insert/add/remove/move，path 为 JSON Pointer。',
+          ]
+        : [
+              '更新块格式（二选一）：',
+              '  格式A（命令方言）：',
+              '    <UpdateVariable>',
+              '      _.set(\'变量路径\', 新值);//原因',
+              '      _.insert(\'变量路径\', 新值);',
+              '    </UpdateVariable>',
+              '  格式B（JSON Patch 方言）：',
+              '    <UpdateVariable>',
+              '      <JSONPatch>[{"op":"replace","path":"/理/好感度","value":50}]</JSONPatch>',
+              '    </UpdateVariable>',
+          ];
+    const system_parts = [
+        '<must>',
+        '你是变量更新 Agent。现在执行【更新】阶段：基于上一轮决策与以下「变量观察」，输出变量更新。',
+        '剧情已在上下文中，不要重复阅读或复述剧情。',
+        opts.structured
+            ? '并只输出结构化 JSON，不要输出任何解释或正文。'
+            : '并只输出一个 <UpdateVariable> 更新块，不要输出任何解释或正文。',
+        ...format_instructions,
+        '规则：',
+        '- 只更新「变量观察」中列出的变量；不在列表中的变量一律不要写（越权写入会被本地引擎拒绝）。',
+        '- 对「变量观察」中的每个变量逐一判断：确实需要更新的，必须写出对应的 op，不要因为数量多而省略。',
+        '- 变量路径相对于 stat_data（如 理.好感度），JSON Patch 的 path 为 JSON Pointer（如 /理/好感度）。',
+        '- 若本轮无需更新任何变量，输出空数组：[]（structured 模式）或空块：<UpdateVariable></UpdateVariable>（文本模式）。',
+        '</must>',
+    ].join('\n');
+    const user_parts = ['变量观察：', opts.observation || '（无）'];
+    if (opts.rules.length > 0) {
+        user_parts.push('', '相关更新规则：', opts.rules.join('\n---\n'));
+    }
+    if (opts.lore && opts.lore.length > 0) {
+        user_parts.push('', '相关世界书背景（理解世界用，不是更新规则）：', opts.lore.join('\n---\n'));
+    }
+    if (opts.lastRound) {
+        user_parts.push('', '上一轮更新情况（参考，避免重复/遗漏）：', opts.lastRound);
+    }
+    if (opts.last_error) {
+        user_parts.push('', '上次输出未通过本地校验，原因：' + opts.last_error, '请修正后重新输出。');
+    }
+    return [
+        ...opts.prev,
+        { role: 'assistant', content: opts.decideOutput },
+        { role: 'system', content: system_parts },
+        { role: 'user', content: user_parts.join('\n') },
+    ];
+}
+
+/** 把多轮消息构造为 generateRaw 配置（消息即 ordered_prompts，末尾 user 触发生成） */
+export function buildMessagesRawConfig(opts: {
+    messages: ChatMessage[];
+    custom_api?: Record<string, any>;
+    json_schema?: object;
+    max_tokens?: number;
+}): Record<string, any> {
+    const config: Record<string, any> = {
+        should_stream: false,
+        max_tokens: opts.max_tokens ?? UPDATE_MAX_TOKENS,
+        ordered_prompts: opts.messages.map(m => ({ role: m.role, content: m.content })),
+    };
+    if (opts.custom_api) {
+        config.custom_api = opts.custom_api;
+    }
+    if (opts.json_schema) {
+        config.json_schema = opts.json_schema;
+    }
+    return config;
+}
 
 /** 构造决策阶段 generateRaw 配置（纯文本，不结构化；限 max_tokens 防长输出） */
 export function buildDecideRawConfig(opts: {
@@ -174,6 +235,7 @@ export function buildAgentUpdateTask(opts: {
     /** 结构化输出模式（配合 json_schema）：要求模型输出 {analysis, json_patch} JSON */
     structured?: boolean;
 }): string {
+    // 兼容旧单轮调用（多轮消息见 buildUpdateMessages）；剧情仍拼入（旧调用方）
     const format_instructions = opts.structured
         ? [
               '你必须以结构化 JSON 输出（不要 <UpdateVariable> 标签、不要解释）：',
