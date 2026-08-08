@@ -1059,6 +1059,9 @@ function wrapStructuredPatch(text: string): string | null {
 // 应用层（复用原版 updateVariables）
 // ---------------------------------------------------------------------------
 
+/** 最近一次成功应用的 ops（供「重新处理变量」零模型重放，v2.0.5） */
+let last_applied: PreparedOps | null = null;
+
 /**
  * 把校验通过的 ops 回放给原版 MVU 命令解释器（updateVariables）应用一次。
  * 命令方言 → 原样拼接命令文本；JSON Patch 方言 → 包 <JSONPatch> 标签。
@@ -1094,7 +1097,26 @@ async function applyPreparedOps(prepared: PreparedOps): Promise<{ applied: boole
     } catch {
         /* 刷新失败不影响变量已写入 */
     }
+    if (has_variable_modified) {
+        last_applied = prepared; // 记录供「重新处理变量」重放
+    }
     return { applied: has_variable_modified };
+}
+
+/**
+ * 重新处理（v2.0.5）：【零模型调用】重放最近一次成功应用的 ops——
+ * 不发请求、不重新决策，本地重算变量（幂等）。区别于「重试」（重新决策+更新）。
+ */
+export async function reprocessLastUpdate(): Promise<{ applied: boolean } | null> {
+    if (!last_applied) {
+        try {
+            toastr.info('暂无已应用的更新可重新处理', '[革新版·Agent]重新处理变量');
+        } catch {
+            /* ignore */
+        }
+        return null;
+    }
+    return applyPreparedOps(last_applied);
 }
 
 // ---------------------------------------------------------------------------

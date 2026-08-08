@@ -4,7 +4,7 @@ import { isFunctionCallingSupported } from '@/function/is_function_calling_suppo
 import { cleanUpMetadata, reconcileAndApplySchema } from '@/function/schema';
 import { onMessageReceived } from '@/function/update/on_message_received';
 import { handleVariablesInMessage, updateVariables } from '@/function/update_variables';
-import { retryLastAgentWorkflow } from '@/innovation/agent_workflow_bridge';
+import { retryLastAgentWorkflow, reprocessLastUpdate } from '@/innovation/agent_workflow_bridge';
 import { loadInnovationSettings } from '@/innovation/settings';
 import { useDataStore } from '@/store';
 import { getLastValidMessageId, getLastValidVariable } from '@/util';
@@ -145,13 +145,14 @@ export const buttons: Button[] = [
     {
         name: '重新处理变量',
         function: async () => {
-            // [革新版接管] agentEnabled 时：革新版直接写楼层变量（消息里无 <UpdateVariable> 块），
-            // 原逻辑 unset stat_data + 解析消息块会【清空变量】——改为重跑革新版完整工作流
+            // [革新版接管] agentEnabled 时：重新处理 = 【零模型调用】重放最近一次
+            // 成功应用的 ops（本地重算，不发请求、不重新决策）；「重试额外模型解析」
+            // 才是重新决策+更新（发请求）。原逻辑 unset stat_data + 解析消息块会清空变量。
             if (loadInnovationSettings(localStorage).agentEnabled) {
-                const result = await retryLastAgentWorkflow(true);
+                const result = await reprocessLastUpdate();
                 if (result) {
                     toastr.info(
-                        `已重新处理（${result.termination}，阶段 ${result.stages.join('→')}）`,
+                        result.applied ? '已重新处理（变量已重算）' : '已重新处理（无变化）',
                         '[革新版·Agent]重新处理变量'
                     );
                 }
