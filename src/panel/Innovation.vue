@@ -68,22 +68,23 @@
                 <p v-if="poolState && poolState.error" class="nlkaleido-warn">
                     缓存池错误：{{ poolState.error }}
                 </p>
-                <p v-else-if="poolState" class="nlkaleido-tip">
-                    建池 {{ formatTime(poolState.builtAt) }} ·
-                    加载「{{ poolState.loaded_names.join('、') }}」·
-                    入池 <b>{{ poolState.entries }}</b> 条目
-                    （规则 {{ poolState.rules }} ·
-                    灯效 蓝{{ poolState.strategy.constant }} / 绿{{ poolState.strategy.selective }} /
-                    向量{{ poolState.strategy.vectorized }}）·
-                    索引 规则路径{{ poolState.indexStats.rulePaths }} /
-                    精确映射{{ poolState.indexStats.rulePathToRules }} ·
-                    ZOD 仓库
-                    {{
-                        poolState.zodScripts.length > 0
-                            ? `「${poolState.zodScripts.join('、')}」${poolState.zodPathCount} 路径`
-                            : '未发现'
-                    }} ·
-                    AI 规则分池
+                    <p v-else-if="poolState" class="nlkaleido-tip">
+                        建池 {{ formatTime(poolState.builtAt) }} ·
+                        加载「{{ poolState.loaded_names.join('、') }}」·
+                        入池 <b>{{ poolState.entries }}</b> 条目
+                        （规则 {{ poolState.rules }} ·
+                        背景 {{ poolState.entries - poolState.rules }} ·
+                        灯效 蓝{{ poolState.strategy.constant }} / 绿{{ poolState.strategy.selective }} /
+                        向量{{ poolState.strategy.vectorized }}）·
+                        索引 规则路径{{ poolState.indexStats.rulePaths }} /
+                        精确映射{{ poolState.indexStats.rulePathToRules }} ·
+                        ZOD 仓库
+                        {{
+                            poolState.zodScripts.length > 0
+                                ? `「${poolState.zodScripts.join('、')}」${poolState.zodPathCount} 路径`
+                                : '未发现'
+                        }} ·
+                        AI 规则分池
                     {{
                         poolState.aiMerged
                             ? `已合并（${poolState.aiBatchesOk}/${poolState.aiBatchesTotal} 批，${poolState.aiDurationMs}ms）`

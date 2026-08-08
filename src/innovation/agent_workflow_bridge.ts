@@ -1092,16 +1092,14 @@ export async function runAgentWorkflowForMessage(
                 zodPathCount: (state.zodPaths ?? []).length,
             };
             const contents = state.pool.rules.map(r => r.content);
-            // 候选路径来源：AI 规则分池路径 ∪ ZOD 变量仓库路径（作者声明，AI 分池失败时兜底）
-            const extraPaths = [...state.pool.rulePaths];
-            for (const p of state.zodPaths ?? []) {
-                if (!extraPaths.includes(p)) extraPaths.push(p);
-            }
+            // 候选路径来源：AI 规则分池路径（ZOD 仓库路径改由核心兜底——仅候选为空时启用，
+            // 避免 115 条 ZOD 路径每轮全量并入导致决策逐项判断 150+ 行拖慢速度）
             return {
                 entries: contents,
                 raw: contents.join('\n---\n'),
                 lore: [],
-                extraPaths,
+                extraPaths: state.pool.rulePaths,
+                zodPaths: state.zodPaths ?? [],
                 mandatoryPaths: state.pool.mandatoryPaths,
             };
         },

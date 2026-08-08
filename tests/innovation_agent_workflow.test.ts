@@ -479,6 +479,51 @@ describe('runAgentWorkflow agent 化工作流（候选搜索→决策→拉取�
         expect(result.candidateSource).toEqual({ from_rules: 1, from_story: 1 });
     });
 
+    test('ZOD 变量仓库兜底：AI 规则路径与剧情都未命中时，候选不空（v1.12.4）', async () => {
+        const seen: string[][] = [];
+        const executor = buildExecutor({
+            // 规则无管辖路径（AI 分池失败场景）、剧情无命中 → 候选为空 → ZOD 兜底
+            readRules: async () => ({
+                entries: ['散文规则，AI 分池未给路径'],
+                raw: '',
+                zodPaths: ['理.好感度', '世界.时间', '不存在.路径', '道侣.<键>.亲密'],
+            }),
+            decide: async input => {
+                seen.push(input.candidates);
+                return { text: '理.好感度: Y', raw: '' };
+            },
+        });
+        const result = await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 3,
+            loopThreshold: 2,
+        });
+        // ZOD 兜底：存在的路径进候选，不存在的（含 record 模板）被存在性校验过滤
+        expect(seen[0]).toEqual(['理.好感度', '世界.时间']);
+        expect(result.termination).toBe('done');
+    });
+
+    test('AI 规则路径存在时 ZOD 不兜底（避免每轮全量并入拖慢）', async () => {
+        const seen: string[][] = [];
+        const executor = buildExecutor({
+            readRules: async () => ({
+                entries: ['规则'],
+                raw: '',
+                extraPaths: ['理.好感度'],
+                zodPaths: ['世界.时间', '理.心情'],
+            }),
+            decide: async input => {
+                seen.push(input.candidates);
+                return { text: '理.好感度: Y', raw: '' };
+            },
+        });
+        await runAgentWorkflow(executor, { state: STATE, story: '' }, {
+            maxRetries: 3,
+            loopThreshold: 2,
+        });
+        // 候选只有 AI 规则路径 + 剧情命中，ZOD 路径不并入
+        expect(seen[0]).toEqual(['理.好感度']);
+    });
+
     test('强制更新路径每轮必进候选并传给决策（通用机制，防偷懒）', async () => {
         const seen: { candidates: string[]; mandatory?: string[] }[] = [];
         const executor = buildExecutor({

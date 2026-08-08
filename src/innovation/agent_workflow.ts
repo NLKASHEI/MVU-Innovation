@@ -46,6 +46,8 @@ export interface RuleSet {
     lore?: string[];
     /** AI 规则分池给出的管辖路径（worldbook_pool 产物，供候选搜索；无正则提取） */
     extraPaths?: string[];
+    /** ZOD 变量仓库路径（作者声明；仅候选为空时兜底，不每轮全量并入——151 路径逐项判断拖慢速度） */
+    zodPaths?: string[];
     /** 强制更新路径（规则标 MANDATORY/必须/每轮 → 每轮必进候选并标注必须更新） */
     mandatoryPaths?: string[];
 }
@@ -953,6 +955,18 @@ export async function runAgentWorkflow(
             if (!normalized) continue;
             if (getPathValue(input.state, normalized) === undefined) continue;
             if (!candidates.includes(normalized)) candidates.push(normalized);
+        }
+        // ZOD 变量仓库兜底：AI 分池失败/剧情未命中（候选为空）时，
+        // 用作者声明的变量仓库路径保证候选不空（存在性校验 + 上限）；
+        // 不每轮全量并入——115 路径逐项判断会拖慢决策速度
+        if (candidates.length === 0) {
+            for (const path of rules.zodPaths ?? []) {
+                const normalized = normalizePath(path);
+                if (!normalized) continue;
+                if (getPathValue(input.state, normalized) === undefined) continue;
+                if (!candidates.includes(normalized)) candidates.push(normalized);
+                if (candidates.length >= (options.maxCandidates ?? 80)) break;
+            }
         }
         base.candidates = candidates;
         base.candidateSource = { from_rules, from_story };
