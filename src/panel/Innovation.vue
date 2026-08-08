@@ -77,6 +77,12 @@
                     向量{{ poolState.strategy.vectorized }}）·
                     索引 规则路径{{ poolState.indexStats.rulePaths }} /
                     精确映射{{ poolState.indexStats.rulePathToRules }} ·
+                    ZOD 仓库
+                    {{
+                        poolState.zodScripts.length > 0
+                            ? `「${poolState.zodScripts.join('、')}」${poolState.zodPathCount} 路径`
+                            : '未发现'
+                    }} ·
                     AI 规则分池
                     {{
                         poolState.aiMerged
@@ -167,6 +173,12 @@
                                 向量{{ entry.pool.strategy.vectorized }}）·
                                 索引 规则路径{{ entry.pool.indexStats.rulePaths }} /
                                 精确映射{{ entry.pool.indexStats.rulePathToRules }} ·
+                                ZOD 仓库
+                                {{
+                                    entry.pool.zodScripts.length > 0
+                                        ? `「${entry.pool.zodScripts.join('、')}」${entry.pool.zodPathCount} 路径`
+                                        : '未发现'
+                                }} ·
                                 AI 规则分池
                                 {{
                                     entry.pool.aiMerged

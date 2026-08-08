@@ -68,6 +68,8 @@ export function buildDecideRawConfig(opts: {
     custom_api?: Record<string, any>;
     ordered_prompts?: (string | { role: string; content: string })[];
     max_tokens?: number;
+    /** 结构化输出 schema（分池等任务用，ST 自动按 provider 转换） */
+    json_schema?: object;
 }): Record<string, any> {
     const ordered_prompts: (string | { role: string; content: string })[] = opts.ordered_prompts
         ? [...opts.ordered_prompts]
@@ -83,7 +85,44 @@ export function buildDecideRawConfig(opts: {
     if (opts.custom_api) {
         config.custom_api = opts.custom_api;
     }
+    if (opts.json_schema) {
+        config.json_schema = opts.json_schema;
+    }
     return config;
+}
+
+/**
+ * AI 规则分池的结构化输出 schema（v1.12.2）：
+ * 输出 {classification: [{idx, paths, mandatory, topic}]}——结构化保证解析成功率。
+ */
+export function createAiClassifySchema(): object {
+    return {
+        name: 'nlkaleido_ai_classify',
+        description:
+            'classify worldbook update rules into managed variable paths. Return one entry per rule.',
+        strict: false,
+        value: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                classification: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            idx: { type: 'integer' },
+                            paths: { type: 'array', items: { type: 'string' } },
+                            mandatory: { type: 'array', items: { type: 'string' } },
+                            topic: { type: 'string' },
+                        },
+                        required: ['idx', 'paths'],
+                    },
+                },
+            },
+            required: ['classification'],
+        },
+    };
 }
 
 /** 更新阶段提示词：基于剧情 + 观察 + 规则产出 delta（一步 agent 回合） */

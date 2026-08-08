@@ -28,10 +28,13 @@ import {
     AgentWorkflowResult,
     PreparedOps,
 } from '@/innovation/agent_workflow';
+import { isZodScript, parseZodSchemaPaths } from '@/innovation/agent_zod';
 import {
-    buildAgentUpdateRawConfig,    buildAgentUpdateTask,
+    buildAgentUpdateRawConfig,
+    buildAgentUpdateTask,
     buildDecideRawConfig,
     buildDecideTask,
+    createAiClassifySchema,
     createJsonPatchResponseSchema,
     normalizeGenerateText,
 } from '@/innovation/agent_request';
@@ -142,6 +145,9 @@ export interface PoolDebugDetail {
     aiBatchesTotal: number;
     /** 索引统计（rulePaths 规则路径 / rulePathToRules 精确映射） */
     indexStats: { rulePaths: number; rulePathToRules: number };
+    /** ZOD 变量仓库：命中的脚本名与解析路径数 */
+    zodScripts: string[];
+    zodPathCount: number;
 }
 
 /** 一次工作流运行的完整调试记录 */
@@ -302,6 +308,10 @@ interface PoolState {
     aiBatchesOk: number;
     /** AI 分池总批数 */
     aiBatchesTotal: number;
+    /** ZOD 变量仓库：解析出的变量路径（作者声明，并入候选；AI 分池失败时兜底） */
+    zodPaths: string[];
+    /** ZOD 变量仓库：命中的脚本名 */
+    zodScripts: string[];
     /** 原始加载条目（已过滤：enabled 且 content 非空；供 AI 分池时重建池） */
     rawEntries: any[];
 }
@@ -333,6 +343,8 @@ interface PersistedPool {
     aiLastAttemptAt: number;
     aiBatchesOk: number;
     aiBatchesTotal: number;
+    zodPaths?: string[];
+    zodScripts?: string[];
 }
 
 const POOL_STORAGE_KEY = 'nlkaleido:worldbook_pool_v2';
@@ -372,6 +384,8 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
                   aiDurationMs: 0,                  aiBatchesOk: 0,
                   aiBatchesTotal: 0,
                   indexStats: { rulePaths: 0, rulePathToRules: 0 },
+                  zodScripts: [],
+                  zodPathCount: 0,
                   error: pool_error,
               }
             : null;
@@ -388,6 +402,8 @@ export function getWorldbookPoolState(): (PoolDebugDetail & {
         aiBatchesOk: pool_state.aiBatchesOk,
         aiBatchesTotal: pool_state.aiBatchesTotal,
         indexStats: { ...pool_state.pool.indexStats },
+        zodScripts: pool_state.zodScripts ?? [],
+        zodPathCount: (pool_state.zodPaths ?? []).length,
         error: pool_error,
     };
 }
@@ -443,6 +459,8 @@ function savePersistedPool(state: PoolState): void {
             aiLastAttemptAt: state.aiLastAttemptAt,
             aiBatchesOk: state.aiBatchesOk,
             aiBatchesTotal: state.aiBatchesTotal,
+            zodPaths: state.zodPaths,
+            zodScripts: state.zodScripts,
         };
         pools[state.key] = persisted;
         // LRU 淘汰：保留 builtAt 最新的 POOL_STORAGE_MAX 个
@@ -497,6 +515,9 @@ function poolFromPersisted(p: PersistedPool): PoolState {
         aiLastAttemptAt: p.aiLastAttemptAt ?? 0,
         aiBatchesOk: p.aiBatchesOk,
         aiBatchesTotal: p.aiBatchesTotal,
+        // ZOD 变量仓库：持久化缺失时重新扫描脚本（脚本变化也能跟上）
+        zodPaths: p.zodPaths ?? scanZodScripts().paths,
+        zodScripts: p.zodScripts ?? [],
         rawEntries,
     };
 }
@@ -605,8 +626,19 @@ async function aiClassifyEntries(
             lines,
         ].join('\n');
         try {
-            const config = buildDecideRawConfig({ task, max_tokens: 2000 });
-            const text = normalizeGenerateText(await generateRaw(config));
+            // 首选结构化输出（json_schema，解析成功率大增）；provider 不支持时降级纯文本
+            let text = '';
+            try {
+                const config = buildDecideRawConfig({
+                    task,
+                    max_tokens: 2000,
+                    json_schema: createAiClassifySchema(),
+                });
+                text = normalizeGenerateText(await generateRaw(config));
+            } catch {
+                const fallback_config = buildDecideRawConfig({ task, max_tokens: 2000 });
+                text = normalizeGenerateText(await generateRaw(fallback_config));
+            }
             const parsed = parseAiClassification(text, batchIndexes.length);
             if (parsed) {
                 for (const [local_idx, paths] of parsed.paths) {
@@ -656,6 +688,32 @@ async function classifyPoolWithAi(state: PoolState): Promise<PoolState> {
         aiBatchesOk: result.batchesOk,
         aiBatchesTotal: result.batchesTotal,
     };
+}
+
+/** 扫描角色卡 TH 脚本，识别 ZOD 变量仓库脚本并解析出变量路径树（作者声明的权威变量仓库） */
+function scanZodScripts(): { scriptNames: string[]; paths: string[] } {
+    const scriptNames: string[] = [];
+    const paths: string[] = [];
+    try {
+        const trees: any[] = getScriptTrees({ type: 'character' });
+        const visit = (node: any) => {
+            if (!node) return;
+            if (node.type === 'script' && typeof node.content === 'string') {
+                if (isZodScript(node.content)) {
+                    scriptNames.push(String(node.name ?? node.id ?? '未知'));
+                    for (const p of parseZodSchemaPaths(node.content)) {
+                        if (!paths.includes(p)) paths.push(p);
+                    }
+                }
+            } else if (node.type === 'folder' && Array.isArray(node.scripts)) {
+                node.scripts.forEach(visit);
+            }
+        };
+        trees.forEach(visit);
+    } catch {
+        /* 脚本 API 不可用时忽略 */
+    }
+    return { scriptNames, paths };
 }
 
 /**
@@ -718,6 +776,8 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             aiLastAttemptAt: 0,
             aiBatchesOk: 0,
             aiBatchesTotal: 0,
+            zodPaths: [],
+            zodScripts: [],
             rawEntries: [],
         };
     }
@@ -799,6 +859,8 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
 
         // 本地分类建池（规则/剧情/其他 + 灯效状态 + 正则索引）
         const pool = buildWorldbookPool(usable_entries);
+        // ZOD 变量仓库：扫描角色卡 TH 脚本，解析作者声明的变量路径（辅助候选，AI 分池失败时兜底）
+        const zod = scanZodScripts();
         let state: PoolState = {
             key,
             builtAt: Date.now(),
@@ -818,6 +880,8 @@ async function ensureWorldbookPool(force = false): Promise<PoolState> {
             aiLastAttemptAt: 0,
             aiBatchesOk: 0,
             aiBatchesTotal: Math.ceil(usable_entries.length / AI_CLASSIFY_BATCH),
+            zodPaths: zod.paths,
+            zodScripts: zod.scriptNames,
             rawEntries: usable_entries,
         };
         pool_state = state;
@@ -1014,13 +1078,20 @@ export async function runAgentWorkflowForMessage(
                 aiBatchesOk: state.aiBatchesOk,
                 aiBatchesTotal: state.aiBatchesTotal,
                 indexStats: { ...state.pool.indexStats },
+                zodScripts: state.zodScripts ?? [],
+                zodPathCount: (state.zodPaths ?? []).length,
             };
             const contents = state.pool.rules.map(r => r.content);
+            // 候选路径来源：AI 规则分池路径 ∪ ZOD 变量仓库路径（作者声明，AI 分池失败时兜底）
+            const extraPaths = [...state.pool.rulePaths];
+            for (const p of state.zodPaths ?? []) {
+                if (!extraPaths.includes(p)) extraPaths.push(p);
+            }
             return {
                 entries: contents,
                 raw: contents.join('\n---\n'),
                 lore: [],
-                extraPaths: state.pool.rulePaths,
+                extraPaths,
                 mandatoryPaths: state.pool.mandatoryPaths,
             };
         },
